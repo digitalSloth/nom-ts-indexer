@@ -1,0 +1,79 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: nom-indexer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zenon
+      POSTGRES_PASSWORD: zenon_password
+      POSTGRES_DB: nom_indexer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zenon -d nom_indexer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for locking and queuing
+  redis:
+    image: redis:7-alpine
+    container_name: nom-indexer-redis
+    restart: unless-stopped
+    ports:
+      - "6378:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Zenon Network Indexer
+  # Only starts with: docker compose --profile full up
+  # By default `docker compose up` brings up postgres + redis only so you can
+  # run the indexer manually on the host with `npm run dev`.
+  indexer:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nom-indexer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Override host-side defaults so the container reaches the sibling services
+      # via the compose network rather than localhost.
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_USER: zenon
+      DATABASE_PASSWORD: zenon_password
+      DATABASE_NAME: nom_indexer
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    command:
+      - sh
+      - -c
+      - |
+        echo 'Running database migrations...'
+        npm run db:migrate
+        echo 'Running database seeders...'
+        npm run db:seed
+        echo 'Starting indexer...'
+        node dist/index.js
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local

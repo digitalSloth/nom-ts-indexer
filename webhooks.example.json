@@ -1,0 +1,13 @@
+{
+  "webhooks": [
+    {
+      "url": "https://example.com/hooks/momentum",
+      "events": ["momentum.inserted"],
+      "secret": "optional-hmac-secret"
+    },
+    {
+      "url": "https://example.com/hooks/all",
+      "events": ["momentum.inserted", "account_block.inserted"]
+    }
+  ]
+}

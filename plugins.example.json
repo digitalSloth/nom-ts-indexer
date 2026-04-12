@@ -1,0 +1,9 @@
+{
+  "plugins": [
+    {
+      "package": "@zenon/example-plugin",
+      "enabled": false,
+      "config": {}
+    }
+  ]
+}

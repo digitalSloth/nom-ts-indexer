@@ -1,0 +1,30 @@
+import { registerHandler } from '../registry.js';
+import { wrapToken } from './wrap-token.js';
+import { updateWrapRequest } from './update-wrap-request.js';
+import { unwrapToken } from './unwrap-token.js';
+import { redeem } from './redeem.js';
+import { revokeUnwrapRequest } from './revoke-unwrap-request.js';
+import { setNetwork } from './set-network.js';
+import { removeNetwork } from './remove-network.js';
+import { setNetworkMetadata } from './set-network-metadata.js';
+import { setTokenPair } from './set-token-pair.js';
+import { removeTokenPair } from './remove-token-pair.js';
+import { nominateGuardians } from './nominate-guardians.js';
+import { proposeAdministrator } from './propose-administrator.js';
+import { changeAdministrator } from './change-administrator.js';
+
+const CONTRACT = 'Bridge Contract';
+
+registerHandler(CONTRACT, 'WrapToken', wrapToken);
+registerHandler(CONTRACT, 'UpdateWrapRequest', updateWrapRequest);
+registerHandler(CONTRACT, 'UnwrapToken', unwrapToken);
+registerHandler(CONTRACT, 'Redeem', redeem);
+registerHandler(CONTRACT, 'RevokeUnwrapRequest', revokeUnwrapRequest);
+registerHandler(CONTRACT, 'SetNetwork', setNetwork);
+registerHandler(CONTRACT, 'RemoveNetwork', removeNetwork);
+registerHandler(CONTRACT, 'SetNetworkMetadata', setNetworkMetadata);
+registerHandler(CONTRACT, 'SetTokenPair', setTokenPair);
+registerHandler(CONTRACT, 'RemoveTokenPair', removeTokenPair);
+registerHandler(CONTRACT, 'NominateGuardians', nominateGuardians);
+registerHandler(CONTRACT, 'ProposeAdministrator', proposeAdministrator);
+registerHandler(CONTRACT, 'ChangeAdministrator', changeAdministrator);
