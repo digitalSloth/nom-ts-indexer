@@ -65,13 +65,33 @@ function makeBuilder(resolveQueue: () => any): MockKnexBuilder {
   const builder: any = {};
 
   const chainMethods = [
-    'where', 'andWhere', 'orWhere', 'whereIn', 'whereNotIn',
-    'whereNull', 'whereNotNull',
-    'leftJoin', 'innerJoin', 'rightJoin',
-    'select', 'orderBy', 'limit', 'offset', 'groupBy', 'having',
-    'count', 'max', 'min', 'sum',
-    'insert', 'update', 'del', 'delete',
-    'returning', 'onConflict', 'merge',
+    'where',
+    'andWhere',
+    'orWhere',
+    'whereIn',
+    'whereNotIn',
+    'whereNull',
+    'whereNotNull',
+    'leftJoin',
+    'innerJoin',
+    'rightJoin',
+    'select',
+    'orderBy',
+    'limit',
+    'offset',
+    'groupBy',
+    'having',
+    'count',
+    'max',
+    'min',
+    'sum',
+    'insert',
+    'update',
+    'del',
+    'delete',
+    'returning',
+    'onConflict',
+    'merge',
   ];
 
   for (const method of chainMethods) {
@@ -88,7 +108,7 @@ function makeBuilder(resolveQueue: () => any): MockKnexBuilder {
       const val = resolveQueue();
       // Always return an array from `then` — knex `.returning()` returns arrays.
       // Select queries use `.first()` which bypasses `then` and returns a single object.
-      const result = Array.isArray(val) ? val : (val != null ? [val] : []);
+      const result = Array.isArray(val) ? val : val != null ? [val] : [];
       return Promise.resolve(result).then(resolve, reject);
     } catch (err) {
       if (reject) return Promise.reject(err).then(resolve, reject);

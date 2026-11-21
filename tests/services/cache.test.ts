@@ -37,6 +37,7 @@ describe('cacheService', () => {
     process.env.REDIS_PORT = '6390';
     process.env.REDIS_PASSWORD = 'pw';
     process.env.REDIS_DB = '2';
+    process.env.REDIS_KEY_PREFIX = 'indexer:mainnet:';
 
     const c1 = cacheService.getClient();
 
@@ -47,6 +48,7 @@ describe('cacheService', () => {
         port: 6390,
         password: 'pw',
         db: 2,
+        keyPrefix: 'indexer:mainnet:',
       }),
     );
     expect(onSpy).toHaveBeenCalledWith('error', expect.any(Function));
@@ -61,6 +63,7 @@ describe('cacheService', () => {
     delete process.env.REDIS_PORT;
     delete process.env.REDIS_PASSWORD;
     delete process.env.REDIS_DB;
+    delete process.env.REDIS_KEY_PREFIX;
 
     cacheService.getClient();
 
@@ -69,6 +72,7 @@ describe('cacheService', () => {
         host: 'localhost',
         port: 6379,
         db: 0,
+        keyPrefix: 'indexer:',
       }),
     );
   });

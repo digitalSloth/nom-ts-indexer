@@ -1,10 +1,17 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { accountRegistry } from '../../../src/services/registries/account-registry.js';
-import { pillarRegistry } from '../../../src/services/registries/pillar-registry.js';
 import { makeMockKnex, type MockKnex } from '../../helpers/mock-knex.js';
 import { makeMockMomentum } from '../../helpers/mock-zenon.js';
 
+const recordPillarProduction = vi.fn();
+const settleTimeChallenges = vi.fn();
+vi.mock('../../../src/actions/indexer/pillar-metrics.js', () => ({ recordPillarProduction }));
+vi.mock('../../../src/actions/indexer/settle-time-challenges.js', () => ({
+  settleTimeChallenges,
+}));
+
 let insertMomentum: typeof import('../../../src/actions/indexer/insert-momentum.js').insertMomentum;
+let pillarRegistry: typeof import('../../../src/services/registries/pillar-registry.js').pillarRegistry;
+let accountRegistry: typeof import('../../../src/services/registries/account-registry.js').accountRegistry;
 
 describe('insertMomentum', () => {
   let tx: MockKnex;
@@ -12,9 +19,13 @@ describe('insertMomentum', () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ insertMomentum } = await import('../../../src/actions/indexer/insert-momentum.js'));
+    ({ pillarRegistry } = await import('../../../src/services/registries/pillar-registry.js'));
+    ({ accountRegistry } = await import('../../../src/services/registries/account-registry.js'));
     tx = makeMockKnex();
     accountRegistry.clear();
     pillarRegistry.clear();
+    recordPillarProduction.mockReset();
+    settleTimeChallenges.mockReset();
   });
 
   it('upserts momentum with pillar resolved from registry', async () => {
@@ -43,6 +54,9 @@ describe('insertMomentum', () => {
     expect(builder.insert).toHaveBeenCalled();
     expect(builder.onConflict).toHaveBeenCalled();
     expect(builder.returning).toHaveBeenCalled();
+    const createdAt = new Date(1700000000 * 1000);
+    expect(recordPillarProduction).toHaveBeenCalledWith(tx, 7, 12345n, createdAt);
+    expect(settleTimeChallenges).toHaveBeenCalledWith(tx, 12345n, createdAt);
   });
 
   it('sets producerPillarId to null when no registry entry', async () => {
@@ -54,6 +68,7 @@ describe('insertMomentum', () => {
     const builder = tx.lastBuilder();
     expect(builder.insert).toHaveBeenCalled();
     expect(builder.onConflict).toHaveBeenCalled();
+    expect(recordPillarProduction.mock.calls[0][1]).toBeNull();
   });
 
   it('encodes data as base64 when provided', async () => {

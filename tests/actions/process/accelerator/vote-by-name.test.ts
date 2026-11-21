@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 import { AcceleratorProjectVote } from 'znn-typescript-sdk';
 
@@ -8,7 +8,8 @@ describe('voteByName', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   const defaultDecoded = {
-    id: 'projecthash123',
+    // Decoded hash args are 0x-prefixed; rows store bare hex
+    id: '0xprojecthash123',
     name: 'MyPillar',
     vote: AcceleratorProjectVote.yes,
   };
@@ -41,7 +42,10 @@ describe('voteByName', () => {
     tx.resolveNext({ id: 50 }); // existing vote
     tx.resolveNext([{ vote: AcceleratorProjectVote.no }]); // recount
 
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, vote: AcceleratorProjectVote.no } });
+    const ctx = makeActionContext({
+      tx,
+      decoded: { ...defaultDecoded, vote: AcceleratorProjectVote.no },
+    });
     await voteByName(ctx);
 
     expect(tx).toHaveBeenCalledWith('nom_votes');
@@ -61,50 +65,47 @@ describe('voteByName', () => {
     expect(tx).toHaveBeenCalledWith('nom_votes');
   });
 
-  it('throws on missing id', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, id: undefined } });
-    await expect(voteByName(ctx)).rejects.toThrow('missing required field "id"');
+  it('looks up the active pillar with that name', async () => {
+    tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
+    tx.resolveNext({ id: 100 }); // project
+    tx.resolveNext(null); // no existing vote
+    tx.resolveNext([]); // recount
+
+    await voteByName(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    const pillarQuery = tx.mock.results[0].value;
+    expect(pillarQuery.where).toHaveBeenCalledWith({ name: 'MyPillar' });
+    expect(pillarQuery.whereNull).toHaveBeenCalledWith('revoked_at');
   });
 
-  it('throws on missing name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: undefined } });
-    await expect(voteByName(ctx)).rejects.toThrow('missing required field "name"');
+  it('throws when no active pillar has that name', async () => {
+    tx.resolveNext(null);
+
+    await expect(voteByName(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Accelerator.VoteByName: active pillar not found for name MyPillar',
+    );
   });
 
-  it('throws on missing vote', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, vote: undefined } });
-    await expect(voteByName(ctx)).rejects.toThrow('missing required field "vote"');
-  });
-
-  it('warns if pillar not found', async () => {
-    tx.resolveNext(null); // pillar not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await voteByName(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pillar'));
-  });
-
-  it('warns if sender is not pillar owner', async () => {
-    tx.resolveNext({ id: 5, owner_id: 999 }); // pillar with different owner
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await voteByName(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not pillar owner'));
-  });
-
-  it('warns if votable item not found', async () => {
+  it('throws when the votable item is not indexed', async () => {
     tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
     tx.resolveNext(null); // project not found
     tx.resolveNext(null); // phase not found
-    const warnSpy = vi.spyOn(console, 'warn');
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await voteByName(ctx);
+    await expect(voteByName(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Accelerator.VoteByName: votable item not found for hash 0xprojecthash123',
+    );
+  });
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('votable item not found'));
+  it('looks up the votable item by its bare hash', async () => {
+    tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
+    tx.resolveNext(null); // project not found
+    tx.resolveNext({ id: 200 }); // phase found
+    tx.resolveNext(null); // no existing vote
+    tx.resolveNext([]); // recount
+
+    await voteByName(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    expect(tx.mock.results[1].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
+    expect(tx.mock.results[2].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
   });
 });

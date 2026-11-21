@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 
-const { cancelLiquidityStake } = await import('../../../../src/actions/process/liquidity/cancel-liquidity-stake.js');
+const { cancelLiquidityStake } =
+  await import('../../../../src/actions/process/liquidity/cancel-liquidity-stake.js');
 
 describe('cancelLiquidityStake', () => {
   let tx: ReturnType<typeof makeMockTx>;
@@ -10,47 +11,34 @@ describe('cancelLiquidityStake', () => {
     tx = makeMockTx();
   });
 
-  it('ends the active stake', async () => {
-    tx.resolveNext({ id: 42 }); // original block found
-    tx.resolveNext({ id: 55 }); // active stake found
-    tx.resolveNext({});          // update
+  it('ends the stake created by the given block', async () => {
+    tx.resolveNext({ id: 55, ended_at: null }); // stake lookup
+    tx.resolveNext({}); // update
 
-    const ctx = makeActionContext({ tx, decoded: { id: 'originalblockhash' } });
-    await expect(cancelLiquidityStake(ctx)).resolves.toBeUndefined();
-  });
-
-  it('strips 0x prefix from hash', async () => {
-    tx.resolveNext({ id: 42 }); // original block found
-    tx.resolveNext({ id: 55 }); // active stake found
-    tx.resolveNext({});          // update
-
-    const ctx = makeActionContext({ tx, decoded: { id: '0xoriginalblockhash' } });
-    await expect(cancelLiquidityStake(ctx)).resolves.toBeUndefined();
-  });
-
-  it('throws on missing id', async () => {
-    const ctx = makeActionContext({ tx, decoded: {} });
-    await expect(cancelLiquidityStake(ctx)).rejects.toThrow('missing id');
-  });
-
-  it('warns if original block not found', async () => {
-    tx.resolveNext(null); // original block not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { id: 'nonexistent' } });
+    const ctx = makeActionContext({ tx, decoded: { id: '0xstakehash' } });
     await cancelLiquidityStake(ctx);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('block'));
+    expect(tx.mock.results[0].value.where).toHaveBeenCalledWith('ab.hash', 'stakehash');
+    const update = tx.mock.results[1].value;
+    expect(update.where).toHaveBeenCalledWith({ id: 55 });
+    expect(update.update).toHaveBeenCalledWith({ ended_at: new Date('2024-01-01T00:00:00Z') });
   });
 
-  it('warns if active stake not found', async () => {
-    tx.resolveNext({ id: 42 }); // original block found
-    tx.resolveNext(null);        // active stake not found
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('changes nothing when the stake already ended', async () => {
+    tx.resolveNext({ id: 55, ended_at: new Date('2023-12-01T00:00:00Z') }); // stake lookup
 
-    const ctx = makeActionContext({ tx, decoded: { id: 'originalblockhash' } });
+    const ctx = makeActionContext({ tx, decoded: { id: 'stakehash' } });
     await cancelLiquidityStake(ctx);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('active stake'));
+    expect(tx).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws when the stake is not found', async () => {
+    tx.resolveNext(null); // stake lookup
+
+    const ctx = makeActionContext({ tx, decoded: { id: 'stakehash' } });
+    await expect(cancelLiquidityStake(ctx)).rejects.toThrow(
+      'Liquidity.CancelLiquidityStake: stake not found for stakehash',
+    );
   });
 });

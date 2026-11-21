@@ -1,52 +1,42 @@
-import type { ActionContext, ActionHandler } from '../types.js';
-import { BRIDGE_SOFT_DELAY } from '../../../constants/zenon.js';
-import { assertBridgeAdmin } from './admin.js';
-import { assertNoActiveChallenge } from './time-challenge.js';
+import type { ActionHandler } from '../types.js';
+import { BRIDGE_ADMINISTRATOR_DELAY } from '../../../constants/zenon.js';
+import { accountRegistry } from '../../../services/registries/account-registry.js';
+import { passTimeChallenge } from './time-challenge.js';
+import type { GovernedContract } from './governance.js';
 
-export const nominateGuardians: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, decoded, sendBlock, receiveBlock } = ctx;
+/** NominateGuardians: replaces the guardian set once its time challenge passes. */
+export function makeNominateGuardians(contract: GovernedContract): ActionHandler {
+  return async (ctx) => {
+    const { tx, decoded, receiveBlock } = ctx;
 
-  if (!decoded.guardians || !Array.isArray(decoded.guardians) || decoded.guardians.length < 1) {
-    throw new Error('Bridge.NominateGuardians: missing or empty guardians array');
-  }
-
-  if (!(await assertBridgeAdmin(tx, sendBlock.accountId, 'NominateGuardians'))) return;
-
-  // Sort guardians to ensure deterministic hash
-  const sortedGuardians = [...(decoded.guardians as string[])].sort().join(',');
-  if (
-    !(await assertNoActiveChallenge(
-      tx,
-      receiveBlock,
-      'NominateGuardians',
-      sortedGuardians,
-      BRIDGE_SOFT_DELAY,
-    ))
-  ) {
-    console.warn('Bridge.NominateGuardians: time challenge still active');
-    return;
-  }
-
-  // Revoke all existing guardians
-  await tx('nom_bridge_guardians')
-    .whereNull('revoked_at')
-    .update({ revoked_at: receiveBlock.createdAt });
-
-  // Create new guardians
-  for (const guardianAddress of decoded.guardians as string[]) {
-    const account = await tx('nom_accounts')
-      .where({ address: guardianAddress })
-      .select('id')
-      .first();
-    if (!account) {
-      console.warn(`Bridge.NominateGuardians: account not found for ${guardianAddress}`);
-      continue;
+    const guardians = decoded.guardians as string[];
+    // The contract hashes the guardians sorted by address.
+    const challengeData = [...guardians].sort().join(',');
+    if (
+      !(await passTimeChallenge(
+        ctx,
+        contract,
+        'NominateGuardians',
+        challengeData,
+        BRIDGE_ADMINISTRATOR_DELAY,
+      ))
+    ) {
+      return;
     }
 
-    await tx('nom_bridge_guardians').insert({
-      account_id: account.id,
-      nominated_at: receiveBlock.createdAt,
-      accepted_at: receiveBlock.createdAt,
-    });
-  }
-};
+    await tx(contract.guardiansTable)
+      .whereNull('revoked_at')
+      .update({ revoked_at: receiveBlock.createdAt });
+
+    for (const address of guardians) {
+      await tx(contract.guardiansTable).insert({
+        account_id: await accountRegistry.getOrCreate(tx, address),
+        nominated_at: receiveBlock.createdAt,
+        accepted_at: receiveBlock.createdAt,
+      });
+    }
+
+    // A new guardian set starts with no administrator votes.
+    await tx(contract.adminsTable).whereNull('accepted_at').del();
+  };
+}

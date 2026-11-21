@@ -31,12 +31,10 @@ describe('updatePillar', () => {
 
   const existingPillar = {
     id: 42,
-    owner_id: 1,
     producer_account_id: 10,
     withdraw_account_id: 11,
     momentum_rewards: 50,
     delegate_rewards: 75,
-    revoked_at: null,
   };
 
   beforeEach(() => {
@@ -48,8 +46,8 @@ describe('updatePillar', () => {
 
   it('updates pillar and creates history record', async () => {
     tx.resolveNext(existingPillar); // pillar lookup
-    tx.resolveNext({});             // update pillar
-    tx.resolveNext({});             // insert history
+    tx.resolveNext({}); // update pillar
+    tx.resolveNext({}); // insert history
 
     const ctx = makeActionContext({ tx, decoded: defaultDecoded });
     await expect(updatePillar(ctx)).resolves.toBeUndefined();
@@ -63,55 +61,54 @@ describe('updatePillar', () => {
 
     const ctx = makeActionContext({
       tx,
-      decoded: { ...defaultDecoded, giveBlockRewardPercentage: 50, giveDelegateRewardPercentage: 75 },
+      decoded: {
+        ...defaultDecoded,
+        giveBlockRewardPercentage: 50,
+        giveDelegateRewardPercentage: 75,
+      },
     });
     await expect(updatePillar(ctx)).resolves.toBeUndefined();
   });
 
   it('marks isRewardChange false when only producer changed', async () => {
     tx.resolveNext(existingPillar); // pillar lookup
-    tx.resolveNext({});             // update pillar
-    tx.resolveNext({});             // insert history
+    tx.resolveNext({}); // update pillar
+    tx.resolveNext({}); // insert history
 
     const ctx = makeActionContext({
       tx,
-      decoded: { ...defaultDecoded, giveBlockRewardPercentage: 50, giveDelegateRewardPercentage: 75 },
+      decoded: {
+        ...defaultDecoded,
+        giveBlockRewardPercentage: 50,
+        giveDelegateRewardPercentage: 75,
+      },
     });
     await expect(updatePillar(ctx)).resolves.toBeUndefined();
   });
 
-  it('throws on empty name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: '' } });
-    await expect(updatePillar(ctx)).rejects.toThrow('name is empty');
-  });
+  it('records no history when nothing changed', async () => {
+    getOrCreate.mockResolvedValueOnce(10).mockResolvedValueOnce(11);
+    tx.resolveNext(existingPillar); // pillar lookup
 
-  it('warns if pillar not found', async () => {
-    tx.resolveNext(null); // pillar not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
+    const ctx = makeActionContext({
+      tx,
+      decoded: {
+        ...defaultDecoded,
+        giveBlockRewardPercentage: 50,
+        giveDelegateRewardPercentage: 75,
+      },
+    });
     await updatePillar(ctx);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found'));
+    expect(tx).toHaveBeenCalledTimes(1);
   });
 
-  it('warns if sender is not owner', async () => {
-    tx.resolveNext({ ...existingPillar, owner_id: 999 }); // wrong owner
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('throws when the pillar is not found', async () => {
+    tx.resolveNext(null); // pillar lookup
 
     const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePillar(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not pillar owner'));
-  });
-
-  it('warns if pillar is revoked', async () => {
-    tx.resolveNext({ ...existingPillar, revoked_at: new Date() }); // revoked
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePillar(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('revoked'));
+    await expect(updatePillar(ctx)).rejects.toThrow(
+      'Pillar.UpdatePillar: pillar not found for MyPillar',
+    );
   });
 });

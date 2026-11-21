@@ -1,137 +1,109 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { BRIDGE_SOFT_DELAY } from '../../../../src/constants/zenon.js';
+import { argsFor } from './helpers.js';
 
+const passTimeChallenge = vi.fn();
 vi.mock('../../../../src/actions/process/bridge/time-challenge.js', () => ({
-  checkTimeChallenge: vi.fn(async () => ({ isActive: false })),
-  assertNoActiveChallenge: vi.fn(async () => true),
+  passTimeChallenge: (...args: any[]) => passTimeChallenge(...args),
+}));
+
+const getOrLoad = vi.fn();
+vi.mock('../../../../src/services/registries/token-registry.js', () => ({
+  tokenRegistry: { getOrLoad: (...args: any[]) => getOrLoad(...args) },
 }));
 
 const { setTokenPair } = await import('../../../../src/actions/process/bridge/set-token-pair.js');
-const { checkTimeChallenge, assertNoActiveChallenge } = await import('../../../../src/actions/process/bridge/time-challenge.js');
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
+const decoded = {
+  networkClass: 2,
+  chainId: 1,
+  tokenStandard: 'zts1test',
+  tokenAddress: '0xABC',
+  bridgeable: true,
+  redeemable: true,
+  owned: false,
+  minAmount: '1000',
+  feePercentage: 100,
+  redeemDelay: 40,
+  metadata: '{}',
+};
 
 describe('setTokenPair', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
-  const defaultDecoded = {
-    networkClass: 1,
-    chainId: 1,
-    tokenStandard: 'zts1znnxxxxxxxxxxxxx9z4ulx',
-    tokenAddress: '0xtokenaddr',
-    bridgeable: true,
-    redeemable: true,
-    owned: false,
-    minAmount: '100',
-    feePercentage: 100,
-    redeemDelay: 600,
-    metadata: '{"name":"test"}',
-  };
-
   beforeEach(() => {
     tx = makeMockTx();
-    vi.mocked(checkTimeChallenge).mockReset();
-    vi.mocked(checkTimeChallenge).mockResolvedValue({ isActive: false });
-    vi.mocked(assertNoActiveChallenge).mockReset();
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(true);
+    passTimeChallenge.mockReset();
+    getOrLoad.mockReset();
+    getOrLoad.mockResolvedValue(4);
   });
 
-  it('creates new token pair', async () => {
-    tx.resolveNext({ account_id: 1 });  // assertBridgeAdmin → getActiveAdminAccountId
-    tx.resolveNext({ id: 10 });        // findActiveBridgeNetwork
-    tx.resolveNext({ id: 5 });         // token lookup
-    tx.resolveNext(null);              // bridgeNetworkToken lookup (not found)
-    tx.resolveNext({});                // insert
+  const run = () =>
+    setTokenPair(makeActionContext({ tx, decoded, receiveBlock: { createdAt: CREATED_AT } }));
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(setTokenPair(ctx)).resolves.toBeUndefined();
+  it('only starts the time challenge on the first call', async () => {
+    passTimeChallenge.mockResolvedValue(false);
+
+    await run();
+
+    expect(passTimeChallenge).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ contractName: 'Bridge Contract' }),
+      'SetTokenPair',
+      expect.stringContaining('"tokenAddress":"0xabc"'),
+      BRIDGE_SOFT_DELAY,
+    );
+    expect(tx).not.toHaveBeenCalled();
   });
 
-  it('updates existing token pair', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 5 });
-    tx.resolveNext({ id: 42 });       // existing bridgeNetworkToken
-    tx.resolveNext({});                // update
+  it('inserts a new pair with a lower-case token address once the challenge passes', async () => {
+    passTimeChallenge.mockResolvedValue(true);
+    tx.resolveNext({ id: 7 }); // network
+    tx.resolveNext(null); // no existing pair
+    tx.resolveNext({});
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(setTokenPair(ctx)).resolves.toBeUndefined();
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_network_tokens', 'insert')).toEqual([
+      {
+        bridge_network_id: 7,
+        token_id: 4,
+        token_address: '0xabc',
+        min_amount: '1000',
+        fee_percentage: 100,
+        redeem_delay: 40,
+        metadata: '{}',
+        is_bridgeable: true,
+        is_redeemable: true,
+        is_owned: false,
+        updated_at: CREATED_AT,
+        created_at: CREATED_AT,
+      },
+    ]);
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, tokenStandard: undefined } });
-    await expect(setTokenPair(ctx)).rejects.toThrow('missing required fields');
-  });
+  it('replaces the existing pair for the same token or address', async () => {
+    passTimeChallenge.mockResolvedValue(true);
+    tx.resolveNext({ id: 7 });
+    tx.resolveNext({ id: 12 });
+    tx.resolveNext({});
 
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
+    await run();
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('warns if time challenge still active', async () => {
-    tx.resolveNext({ account_id: 1 });
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(false);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('time challenge'));
-  });
-
-  it('warns if network not found', async () => {
-    tx.resolveNext({ account_id: 1 });  // assertBridgeAdmin
-    tx.resolveNext(null);              // findActiveBridgeNetwork
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('network not found'));
-  });
-
-  it('warns if token not found', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext(null);              // token lookup
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('token not found'));
-  });
-
-  it('warns if ZNN/QSR owned', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 5 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { ...defaultDecoded, owned: true, tokenStandard: 'zts1znnxxxxxxxxxxxxx9z4ulx' },
+    expect(argsFor(tx, 'nom_bridge_network_tokens', 'insert')).toEqual([]);
+    expect(argsFor(tx, 'nom_bridge_network_tokens', 'update')[0]).toMatchObject({
+      token_id: 4,
+      token_address: '0xabc',
     });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('cannot be owned'));
   });
 
-  it('warns if redeemDelay is 0', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 5 });
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('throws when the token cannot be loaded', async () => {
+    passTimeChallenge.mockResolvedValue(true);
+    tx.resolveNext({ id: 7 });
+    getOrLoad.mockResolvedValue(null);
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { ...defaultDecoded, redeemDelay: 0 },
-    });
-    await setTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('redeemDelay'));
+    await expect(run()).rejects.toThrow('Bridge.SetTokenPair: token not found for zts1test');
   });
 });

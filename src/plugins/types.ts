@@ -19,6 +19,8 @@ export interface IndexedAccountBlockEvent {
   momentum: IndexedMomentumEvent;
   contractMethod: { contractName: string; methodName: string } | null;
   pairedBlockHash: string | null;
+  /** Contract receive blocks only: 1 = the call succeeded, 2 = it failed and was rolled back. */
+  callStatus: number | null;
 }
 
 export interface PluginLogger {
@@ -35,7 +37,7 @@ import type { Knex } from 'knex';
  *
  * New plugins should use the Knex query builder directly:
  *   db('table').where({ column: value }).select('*')
- *   db.transaction(async (tx) => { ... })
+ *   event handlers write through their `tx` argument
  */
 export type PluginDb = Knex & {
   execute(sql: string, ...params: unknown[]): Promise<void>;
@@ -50,10 +52,16 @@ export interface PluginContext {
   genesisPath: string;
 }
 
+/**
+ * The handlers write through `tx`, the transaction in which the registry
+ * also moves the plugin's watermark. A momentum (live) or a catch-up
+ * window commits its plugin rows and the watermark together, so no reader
+ * sees a plugin row above the watermark.
+ */
 export interface ZenonIndexerPlugin {
   readonly name: string;
   init(ctx: PluginContext): Promise<void>;
-  onAccountBlock(event: IndexedAccountBlockEvent): Promise<void>;
-  onMomentum?(momentum: IndexedMomentumEvent): Promise<void>;
+  onAccountBlock(event: IndexedAccountBlockEvent, tx: Knex.Transaction): Promise<void>;
+  onMomentum?(momentum: IndexedMomentumEvent, tx: Knex.Transaction): Promise<void>;
   shutdown(): Promise<void>;
 }

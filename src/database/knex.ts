@@ -1,5 +1,7 @@
 import knex from 'knex';
 import 'dotenv/config';
+import { databaseSsl } from './ssl.js';
+import { INDEXER_SCHEMA } from './schema.js';
 
 // ─── Knex singleton ─────────────────────────────────────────────────
 
@@ -12,7 +14,9 @@ const knexSingleton = () => {
       user: process.env.DATABASE_USER || 'postgres',
       password: process.env.DATABASE_PASSWORD || '',
       database: process.env.DATABASE_NAME || 'zenon_indexer',
+      ssl: databaseSsl(),
     },
+    searchPath: [INDEXER_SCHEMA],
     pool: {
       min: 2,
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '10', 10),

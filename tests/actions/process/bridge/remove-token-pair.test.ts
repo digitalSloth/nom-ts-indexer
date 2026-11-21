@@ -1,67 +1,45 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { buildersFor } from './helpers.js';
 
-const { removeTokenPair } = await import('../../../../src/actions/process/bridge/remove-token-pair.js');
+const getOrLoad = vi.fn();
+vi.mock('../../../../src/services/registries/token-registry.js', () => ({
+  tokenRegistry: { getOrLoad: (...args: any[]) => getOrLoad(...args) },
+}));
+
+const { removeTokenPair } =
+  await import('../../../../src/actions/process/bridge/remove-token-pair.js');
 
 describe('removeTokenPair', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
-  const defaultDecoded = {
-    networkClass: 1,
-    chainId: 1,
-    tokenStandard: 'zts1znnxxxxxxxxxxxxx9z4ulx',
-    tokenAddress: '0xtokenaddr',
-  };
-
   beforeEach(() => {
     tx = makeMockTx();
+    getOrLoad.mockReset();
+    getOrLoad.mockResolvedValue(4);
   });
 
-  it('deletes token pair', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({ id: 10 });        // findActiveBridgeNetwork
-    tx.resolveNext({ id: 5 });         // token lookup
-    tx.resolveNext({});                // del
+  const run = () =>
+    removeTokenPair(
+      makeActionContext({
+        tx,
+        decoded: { networkClass: 2, chainId: 1, tokenStandard: 'zts1test', tokenAddress: '0xabc' },
+      }),
+    );
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(removeTokenPair(ctx)).resolves.toBeUndefined();
+  it('deletes the token pair', async () => {
+    tx.resolveNext({ id: 7 });
+    tx.resolveNext({});
+
+    await run();
+
+    const [pair] = buildersFor(tx, 'nom_bridge_network_tokens');
+    expect(pair.where).toHaveBeenCalledWith({ bridge_network_id: 7, token_id: 4 });
+    expect(pair.del).toHaveBeenCalled();
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, tokenStandard: undefined } });
-    await expect(removeTokenPair(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await removeTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('warns if network not found', async () => {
-    tx.resolveNext({ account_id: 1 });
+  it('throws when the network is not found', async () => {
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await removeTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('network not found'));
-  });
-
-  it('warns if token not found', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await removeTokenPair(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('token not found'));
+    await expect(run()).rejects.toThrow('Bridge.RemoveTokenPair: network not found for 2/1');
   });
 });

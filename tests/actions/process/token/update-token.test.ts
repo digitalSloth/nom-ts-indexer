@@ -18,7 +18,7 @@ describe('updateToken', () => {
     tokenStandard: 'zts1znnxxxxxxxxxxxxx9z4ulx',
     owner: 'z1qnewowner',
     isMintable: true,
-    isBurnable: true,
+    isBurnable: false,
   };
 
   beforeEach(() => {
@@ -27,53 +27,37 @@ describe('updateToken', () => {
     getOrCreate.mockResolvedValue(50);
   });
 
-  it('updates token owner, isMintable, isBurnable', async () => {
-    tx.resolveNext({ id: 10, ownerId: 1, isMintable: true, totalSupply: '1000000000' }); // token lookup
-    tx.resolveNext({});   // update
+  function tokenUpdate() {
+    return tx.mock.results[1].value.update.mock.calls[0][0];
+  }
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded, sendBlock: { accountId: 1 } as any });
-    await expect(updateToken(ctx)).resolves.toBeUndefined();
-  });
+  it('sets the owner and flags from the call', async () => {
+    tx.resolveNext({ id: 10, is_mintable: true, total_supply: '1000000000' });
 
-  it('collapses maxSupply when transitioning from mintable to non-mintable', async () => {
-    tx.resolveNext({ id: 10, ownerId: 1, isMintable: true, totalSupply: '1000000000' }); // token lookup
-    tx.resolveNext({});   // update
+    await updateToken(makeActionContext({ tx, decoded: defaultDecoded }));
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { ...defaultDecoded, isMintable: false },
-      sendBlock: { accountId: 1 } as any,
+    expect(getOrCreate).toHaveBeenCalledWith(tx, 'z1qnewowner');
+    expect(tokenUpdate()).toEqual({
+      owner_id: 50,
+      is_mintable: true,
+      is_burnable: false,
+      updated_at: new Date('2024-01-01T00:00:00Z'),
     });
-    await expect(updateToken(ctx)).resolves.toBeUndefined();
   });
 
-  it('throws on missing tokenStandard', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, tokenStandard: undefined } });
-    await expect(updateToken(ctx)).rejects.toThrow('missing tokenStandard');
+  it('drops max_supply to total_supply when a token stops being mintable', async () => {
+    tx.resolveNext({ id: 10, is_mintable: true, total_supply: '1000000000' });
+
+    await updateToken(makeActionContext({ tx, decoded: { ...defaultDecoded, isMintable: false } }));
+
+    expect(tokenUpdate()).toMatchObject({ is_mintable: false, max_supply: '1000000000' });
   });
 
-  it('throws on missing owner', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, owner: undefined } });
-    await expect(updateToken(ctx)).rejects.toThrow('missing tokenStandard');
-  });
+  it('throws when the token is not indexed', async () => {
+    tx.resolveNext(null);
 
-  it('warns if token not found', async () => {
-    tx.resolveNext(null); // token not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updateToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found'));
-  });
-
-  it('warns if sender is not token owner', async () => {
-    tx.resolveNext({ id: 10, ownerId: 999, isMintable: true, totalSupply: '1000000000' }); // token lookup — wrong owner
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded, sendBlock: { accountId: 1 } as any });
-    await updateToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not token owner'));
+    await expect(updateToken(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Token.UpdateToken: token not found for zts1znnxxxxxxxxxxxxx9z4ulx',
+    );
   });
 });

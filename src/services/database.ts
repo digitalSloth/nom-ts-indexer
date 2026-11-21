@@ -29,16 +29,27 @@ class DatabaseService {
   }
 
   /**
+   * Records `height` as the last indexed momentum. Runs inside the
+   * momentum's own transaction, so the stored height always matches the
+   * last committed momentum.
+   */
+  async setLastIndexedMomentum(tx: Knex, height: bigint): Promise<void> {
+    await tx('indexer_state').update({ last_indexed_momentum: height, updated_at: new Date() });
+  }
+
+  /**
    * Get current database height (last indexed momentum).
-   * Reads from IndexerState (constant-time), falling back to MAX(height) only
-   * if the state row is missing or zero — covers fresh installs and recovery
-   * from a crash mid-batch.
+   * Reads from IndexerState (constant-time), falling back to START_HEIGHT and
+   * then MAX(height) when the stored height is zero. With no momentums the
+   * height is 0, so the first momentum indexed is momentum 1 with its
+   * genesis account blocks. The genesis seeders write balances, pillars
+   * and settings; the blocks themselves are indexed like any others.
    */
   async getCurrentHeight(): Promise<bigint> {
     const state = await this.getIndexerState();
-    if (state.last_indexed_momentum && state.last_indexed_momentum > BigInt(0)) {
-      return state.last_indexed_momentum;
-    }
+    // pg returns bigint columns as strings
+    const indexed = BigInt(state.last_indexed_momentum ?? 0);
+    if (indexed > 0n) return indexed;
 
     const startHeight = process.env.START_HEIGHT;
     if (startHeight) {
@@ -46,8 +57,14 @@ class DatabaseService {
       if (parsed > 0n) return parsed;
     }
 
-    const row = await db('nom_momentums').max('height').first();
-    return row?.height ?? BigInt(1);
+    const row = await db('nom_momentums').max('height as height').first();
+    return BigInt(row?.height ?? 0);
+  }
+
+  /** Hash of the stored momentum at `height`, or null when none is stored. */
+  async getMomentumHash(height: bigint): Promise<string | null> {
+    const row = await db('nom_momentums').where({ height }).select('hash').first();
+    return row?.hash ?? null;
   }
 
   /**
@@ -93,39 +110,38 @@ class DatabaseService {
   }
 
   /**
-   * Get statistics
+   * Approximate row counts from the planner statistics in pg_class.
+   * Constant time on any table size, unlike COUNT(*). reltuples is -1
+   * before a table's first ANALYZE, so it is clamped to 0.
    */
   async getStats() {
-    const [momentumCount, accountBlockCount, accountCount, tokenCount, pillarCount] =
-      await Promise.all([
-        db('nom_momentums')
-          .count('* as count')
-          .first()
-          .then((r) => Number(r?.count ?? 0)),
-        db('nom_account_blocks')
-          .count('* as count')
-          .first()
-          .then((r) => Number(r?.count ?? 0)),
-        db('nom_accounts')
-          .count('* as count')
-          .first()
-          .then((r) => Number(r?.count ?? 0)),
-        db('nom_tokens')
-          .count('* as count')
-          .first()
-          .then((r) => Number(r?.count ?? 0)),
-        db('nom_pillars')
-          .count('* as count')
-          .first()
-          .then((r) => Number(r?.count ?? 0)),
-      ]);
+    const tables = {
+      momentums: 'nom_momentums',
+      accountBlocks: 'nom_account_blocks',
+      accounts: 'nom_accounts',
+      tokens: 'nom_tokens',
+      pillars: 'nom_pillars',
+    };
+
+    const result = await db.raw(
+      `SELECT relname, GREATEST(reltuples, 0)::bigint AS estimate
+       FROM pg_class
+       WHERE oid IN (SELECT to_regclass(name) FROM unnest(?::text[]) AS name)`,
+      [Object.values(tables)],
+    );
+    const estimates = new Map<string, number>(
+      result.rows.map((row: { relname: string; estimate: string }) => [
+        row.relname,
+        Number(row.estimate),
+      ]),
+    );
 
     return {
-      momentums: momentumCount,
-      accountBlocks: accountBlockCount,
-      accounts: accountCount,
-      tokens: tokenCount,
-      pillars: pillarCount,
+      momentums: estimates.get(tables.momentums) ?? 0,
+      accountBlocks: estimates.get(tables.accountBlocks) ?? 0,
+      accounts: estimates.get(tables.accounts) ?? 0,
+      tokens: estimates.get(tables.tokens) ?? 0,
+      pillars: estimates.get(tables.pillars) ?? 0,
     };
   }
 

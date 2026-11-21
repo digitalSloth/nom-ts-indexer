@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 import { AcceleratorProjectVote } from 'znn-typescript-sdk';
 
-const { voteByProdAddress } = await import('../../../../src/actions/process/accelerator/vote-by-prod-address.js');
+const { voteByProdAddress } =
+  await import('../../../../src/actions/process/accelerator/vote-by-prod-address.js');
 
 describe('voteByProdAddress', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   const defaultDecoded = {
-    id: 'projecthash123',
+    // Decoded hash args are 0x-prefixed; rows store bare hex
+    id: '0xprojecthash123',
     vote: AcceleratorProjectVote.yes,
   };
 
@@ -54,41 +56,60 @@ describe('voteByProdAddress', () => {
     tx.resolveNext({ id: 50 }); // existing vote
     tx.resolveNext([{ vote: AcceleratorProjectVote.no }]); // recount
 
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, vote: AcceleratorProjectVote.no } });
+    const ctx = makeActionContext({
+      tx,
+      decoded: { ...defaultDecoded, vote: AcceleratorProjectVote.no },
+    });
     await voteByProdAddress(ctx);
 
     expect(tx).toHaveBeenCalledWith('nom_votes');
   });
 
-  it('throws on missing id', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, id: undefined } });
-    await expect(voteByProdAddress(ctx)).rejects.toThrow('missing required field "id"');
+  it('looks up the active pillar with the sender as producer', async () => {
+    tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
+    tx.resolveNext({ id: 100 }); // project
+    tx.resolveNext(null); // no existing vote
+    tx.resolveNext([]); // recount
+
+    await voteByProdAddress(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    const pillarQuery = tx.mock.results[0].value;
+    expect(pillarQuery.where).toHaveBeenCalledWith({ producer_account_id: 1 });
+    expect(pillarQuery.whereNull).toHaveBeenCalledWith('revoked_at');
   });
 
-  it('throws on missing vote', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, vote: undefined } });
-    await expect(voteByProdAddress(ctx)).rejects.toThrow('missing required field "vote"');
+  it('throws when no active pillar has the sender as producer', async () => {
+    tx.resolveNext(null);
+
+    await expect(
+      voteByProdAddress(makeActionContext({ tx, decoded: defaultDecoded })),
+    ).rejects.toThrow(
+      'Accelerator.VoteByProdAddress: active pillar not found for producer account 1',
+    );
   });
 
-  it('warns if pillar not found for producer address', async () => {
-    tx.resolveNext(null); // pillar not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await voteByProdAddress(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pillar not found'));
-  });
-
-  it('warns if votable item not found', async () => {
+  it('throws when the votable item is not indexed', async () => {
     tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
     tx.resolveNext(null); // project not found
     tx.resolveNext(null); // phase not found
-    const warnSpy = vi.spyOn(console, 'warn');
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await voteByProdAddress(ctx);
+    await expect(
+      voteByProdAddress(makeActionContext({ tx, decoded: defaultDecoded })),
+    ).rejects.toThrow(
+      'Accelerator.VoteByProdAddress: votable item not found for hash 0xprojecthash123',
+    );
+  });
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('votable item not found'));
+  it('looks up the votable item by its bare hash', async () => {
+    tx.resolveNext({ id: 5, owner_id: 1 }); // pillar
+    tx.resolveNext(null); // project not found
+    tx.resolveNext({ id: 200 }); // phase found
+    tx.resolveNext(null); // no existing vote
+    tx.resolveNext([]); // recount
+
+    await voteByProdAddress(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    expect(tx.mock.results[1].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
+    expect(tx.mock.results[2].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
   });
 });

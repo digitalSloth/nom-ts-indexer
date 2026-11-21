@@ -1,100 +1,78 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { ZNN_TOKEN_STANDARD } from '../../../../src/constants/zenon.js';
+import { argsFor } from './helpers.js';
 
 const { wrapToken } = await import('../../../../src/actions/process/bridge/wrap-token.js');
 
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
+
 describe('wrapToken', () => {
   let tx: ReturnType<typeof makeMockTx>;
-
-  const defaultDecoded = {
-    networkClass: 1,
-    chainId: 1,
-    toAddress: '0xabcdef1234567890abcdef1234567890abcdef12',
-  };
 
   beforeEach(() => {
     tx = makeMockTx();
   });
 
-  it('creates wrap record and updates ZNN totals', async () => {
-    tx.resolveNext({ id: 10 });                    // findActiveBridgeNetwork
-    tx.resolveNext({ id: 20, min_amount: '100' });  // bridgeNetworkToken
-    tx.resolveNext(null);                           // bridgeWrap lookup (not found)
-    tx.resolveNext({});                             // insert wrap
-    tx.resolveNext({ token_standard: 'zts1znnxxxxxxxxxxxxx9z4ulx' }); // token lookup
-    tx.resolveNext({});                             // update network totals
+  const run = () =>
+    wrapToken(
+      makeActionContext({
+        tx,
+        decoded: { networkClass: 2, chainId: 1, toAddress: '0xABCdef' },
+        sendBlock: { id: 10, accountId: 1, tokenId: 4, amount: '500' },
+        receiveBlock: { createdAt: CREATED_AT },
+        frontierMomentum: { height: 4000n },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: defaultDecoded,
-      sendBlock: { tokenId: 5, amount: BigInt(500) } as any,
-    });
-    await expect(wrapToken(ctx)).resolves.toBeUndefined();
+  it('records the wrap and adds to the network ZNN totals', async () => {
+    tx.resolveNext({ id: 7 }); // network
+    tx.resolveNext({ fee_percentage: 150 }); // token pair
+    tx.resolveNext({}); // insert wrap
+    tx.resolveNext({ token_standard: ZNN_TOKEN_STANDARD }); // token
+
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_wraps', 'insert')).toEqual([
+      {
+        bridge_network_id: 7,
+        account_id: 1,
+        token_id: 4,
+        account_block_id: 10,
+        to_address: '0xabcdef',
+        amount: '500',
+        fee: '7', // 500 * 150 / 10000 = 7.5, rounded down
+        creation_momentum_height: 4000n,
+        created_at: CREATED_AT,
+      },
+    ]);
+    const [totals] = argsFor(tx, 'nom_bridge_networks', 'update');
+    expect(Object.keys(totals)).toEqual(['total_znn_wrapped', 'total_znn_held', 'updated_at']);
+    expect(tx.raw).toHaveBeenCalledWith(`(COALESCE(??, '0')::numeric + ?::numeric)::text`, [
+      'total_znn_held',
+      '500',
+    ]);
   });
 
-  it('creates wrap record and updates QSR totals', async () => {
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 20, min_amount: '0' });
-    tx.resolveNext(null);
+  it('leaves network totals alone for other tokens', async () => {
+    tx.resolveNext({ id: 7 });
+    tx.resolveNext({ fee_percentage: 0 });
     tx.resolveNext({});
-    tx.resolveNext({ token_standard: 'zts1qsrxxxxxxxxxxxxxmrhjll' });
-    tx.resolveNext({});
+    tx.resolveNext({ token_standard: 'zts1other' });
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: defaultDecoded,
-      sendBlock: { tokenId: 5, amount: BigInt(1000) } as any,
-    });
-    await expect(wrapToken(ctx)).resolves.toBeUndefined();
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_networks', 'update')).toEqual([]);
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, toAddress: undefined } });
-    await expect(wrapToken(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if network not found', async () => {
+  it('throws when the network is not found', async () => {
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await wrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('network not found'));
+    await expect(run()).rejects.toThrow('Bridge.WrapToken: network not found for 2/1');
   });
 
-  it('warns if token not bridgeable', async () => {
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext(null);              // bridgeNetworkToken not found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await wrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridgeable'));
-  });
-
-  it('warns if amount below minimum', async () => {
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 20, min_amount: '1000' });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: defaultDecoded,
-      sendBlock: { amount: BigInt(500) } as any,
-    });
-    await wrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('below minimum'));
-  });
-
-  it('skips if wrap already exists (idempotent)', async () => {
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 20, min_amount: '0' });
-    tx.resolveNext({ id: 99 });       // existing wrap found
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(wrapToken(ctx)).resolves.toBeUndefined();
+  it('throws when the token pair is not found', async () => {
+    tx.resolveNext({ id: 7 });
+    tx.resolveNext(null);
+    await expect(run()).rejects.toThrow('Bridge.WrapToken: token pair not found for token 4');
   });
 });

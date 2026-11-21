@@ -1,7 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor } from './helpers.js';
 
-const { setNetworkMetadata } = await import('../../../../src/actions/process/bridge/set-network-metadata.js');
+const { setNetworkMetadata } =
+  await import('../../../../src/actions/process/bridge/set-network-metadata.js');
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('setNetworkMetadata', () => {
   let tx: ReturnType<typeof makeMockTx>;
@@ -10,59 +14,28 @@ describe('setNetworkMetadata', () => {
     tx = makeMockTx();
   });
 
-  it('updates metadata', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({ id: 10 });        // findActiveBridgeNetwork
-    tx.resolveNext({});                // update
+  const run = () =>
+    setNetworkMetadata(
+      makeActionContext({
+        tx,
+        decoded: { networkClass: 1, chainId: 1, metadata: '{"key":"value"}' },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1, metadata: '{"foo":"bar"}' },
-    });
-    await expect(setNetworkMetadata(ctx)).resolves.toBeUndefined();
-  });
-
-  it('stringifies object metadata', async () => {
-    tx.resolveNext({ account_id: 1 });
+  it('stores the metadata string as is', async () => {
     tx.resolveNext({ id: 10 });
     tx.resolveNext({});
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1, metadata: { foo: 'bar' } },
-    });
-    await expect(setNetworkMetadata(ctx)).resolves.toBeUndefined();
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_networks', 'update')).toEqual([
+      { meta_data: '{"key":"value"}', updated_at: CREATED_AT },
+    ]);
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { networkClass: 1, chainId: 1 } });
-    await expect(setNetworkMetadata(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1, metadata: '{}' },
-    });
-    await setNetworkMetadata(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('warns if network not found', async () => {
-    tx.resolveNext({ account_id: 1 });
+  it('throws when the network is not found', async () => {
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1, metadata: '{}' },
-    });
-    await setNetworkMetadata(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found'));
+    await expect(run()).rejects.toThrow('Bridge.SetNetworkMetadata: network not found for 1/1');
   });
 });

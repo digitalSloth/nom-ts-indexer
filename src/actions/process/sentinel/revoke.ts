@@ -8,10 +8,9 @@ export const revoke: ActionHandler = async (ctx: ActionContext): Promise<void> =
     .select('id')
     .first();
   if (!sentinel) {
-    console.warn(
-      `Sentinel.Revoke: no active sentinel for account ${sendBlock.accountId}, skipping`,
+    throw new Error(
+      `Sentinel.Revoke: active sentinel not found for account ${sendBlock.accountId}`,
     );
-    return;
   }
 
   await tx('nom_sentinels')

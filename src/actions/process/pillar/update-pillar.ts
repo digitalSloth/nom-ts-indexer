@@ -3,36 +3,20 @@ import { accountRegistry } from '../../../services/registries/account-registry.j
 import { pillarRegistry } from '../../../services/registries/pillar-registry.js';
 
 export const updatePillar: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, decoded, sendBlock, receiveBlock } = ctx;
-
-  if (typeof decoded.name !== 'string' || decoded.name.length === 0) {
-    throw new Error('Pillar.UpdatePillar: name is empty');
-  }
+  const { tx, decoded, receiveBlock } = ctx;
 
   const pillar = await tx('nom_pillars')
     .where({ name: decoded.name })
     .select(
       'id',
-      'owner_id',
       'producer_account_id',
       'withdraw_account_id',
       'momentum_rewards',
       'delegate_rewards',
-      'revoked_at',
     )
     .first();
-
   if (!pillar) {
-    console.warn(`Pillar.UpdatePillar: pillar "${decoded.name}" not found, skipping`);
-    return;
-  }
-  if (pillar.owner_id !== sendBlock.accountId) {
-    console.warn(`Pillar.UpdatePillar: sender is not pillar owner, skipping`);
-    return;
-  }
-  if (pillar.revoked_at) {
-    console.warn(`Pillar.UpdatePillar: pillar is revoked, skipping`);
-    return;
+    throw new Error(`Pillar.UpdatePillar: pillar not found for ${decoded.name}`);
   }
 
   const producerAccountId = await accountRegistry.getOrCreate(
@@ -49,12 +33,14 @@ export const updatePillar: ActionHandler = async (ctx: ActionContext): Promise<v
     pillar.momentum_rewards !== newMomentumRewards ||
     pillar.delegate_rewards !== newDelegateRewards;
 
+  // An update that changes nothing succeeds on chain and records no history.
   if (!changed) {
     return;
   }
 
   const isRewardChange =
-    pillar.momentum_rewards !== newMomentumRewards || pillar.delegate_rewards !== newDelegateRewards;
+    pillar.momentum_rewards !== newMomentumRewards ||
+    pillar.delegate_rewards !== newDelegateRewards;
 
   await tx('nom_pillars').where({ id: pillar.id }).update({
     producer_account_id: producerAccountId,

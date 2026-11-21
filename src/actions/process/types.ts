@@ -1,7 +1,11 @@
 import type { Knex } from 'knex';
-import type { AccountBlock } from 'znn-typescript-sdk';
 
 export type KnexTransactionClient = Knex.Transaction;
+
+export interface FrontierMomentum {
+  height: bigint;
+  timestamp: Date;
+}
 
 export interface ActionContext {
   tx: KnexTransactionClient;
@@ -10,6 +14,12 @@ export interface ActionContext {
     momentumId: number;
     createdAt: Date;
   };
+  /**
+   * The momentum the contract read as its frontier while running the call:
+   * the receive block's acknowledged momentum. Contract rules that use the
+   * current height or time (expiries, delays, enforcement heights) use it.
+   */
+  frontierMomentum: FrontierMomentum;
   sendBlock: {
     id: number;
     accountId: number;

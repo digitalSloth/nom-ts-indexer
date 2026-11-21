@@ -101,6 +101,10 @@ describe('TokenRegistry', () => {
     expect(id).toBe(77);
     expect(accountRegistry.getOrCreate).toHaveBeenCalledWith(mockDb, 'z1owner');
     expect(tokenRegistry.get(zts)).toBe(77);
+    // The node reports no initial supply or issue time.
+    const inserted = mockDb.lastBuilder().insert.mock.calls[0][0];
+    expect(inserted.initial_supply).toBeNull();
+    expect(inserted).not.toHaveProperty('created_at');
   });
 
   it('getOrLoad returns null when RPC returns no data', async () => {

@@ -4,11 +4,13 @@ import { createApiServer } from '../../src/api/server.js';
 
 function get(port: number, path: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    http.get({ hostname: '127.0.0.1', port, path }, (res) => {
-      let body = '';
-      res.on('data', (chunk: Buffer) => (body += chunk));
-      res.on('end', () => resolve({ status: res.statusCode!, body }));
-    }).on('error', reject);
+    http
+      .get({ hostname: '127.0.0.1', port, path }, (res) => {
+        let body = '';
+        res.on('data', (chunk: Buffer) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      })
+      .on('error', reject);
   });
 }
 

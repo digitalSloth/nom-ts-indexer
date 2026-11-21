@@ -16,6 +16,8 @@ vi.mock('../../../../src/services/registries/pillar-registry.js', () => ({
   },
 }));
 
+const { PILLAR_QSR_STAKE_BASE_AMOUNT, PILLAR_QSR_STAKE_INCREASE_AMOUNT } =
+  await import('../../../../src/constants/zenon.js');
 const { register } = await import('../../../../src/actions/process/pillar/register.js');
 
 describe('register', () => {
@@ -36,33 +38,56 @@ describe('register', () => {
     setPillarId.mockReset();
   });
 
+  const COST = PILLAR_QSR_STAKE_BASE_AMOUNT + PILLAR_QSR_STAKE_INCREASE_AMOUNT * 5n;
+
   it('creates pillar and updates registry', async () => {
-    tx.resolveNext({ c: '5' }); // count query → 5
+    tx.resolveNext({ c: '5' }); // count query
     tx.resolveNext({ id: 42 }); // insert pillar
+    tx.resolveNext({ id: 7, amount: COST.toString() }); // deposit lookup
 
     const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(register(ctx)).resolves.toBeUndefined();
+    await register(ctx);
 
     expect(setPillarId).toHaveBeenCalledWith(10, 42);
   });
 
-  it('throws on missing name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: undefined } });
-    await expect(register(ctx)).rejects.toThrow('missing required field "name"');
+  it('prices the QSR burn by the number of active non-legacy pillars', async () => {
+    tx.resolveNext({ c: '5' }); // count query
+    tx.resolveNext({ id: 42 }); // insert pillar
+    tx.resolveNext({ id: 7, amount: COST.toString() }); // deposit lookup
+
+    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
+    await register(ctx);
+
+    const countBuilder = tx.mock.results[0].value;
+    expect(countBuilder.where).toHaveBeenCalledWith({ is_legacy: false, revoked_at: null });
+    const insertBuilder = tx.mock.results[1].value;
+    expect(insertBuilder.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'MyPillar',
+        qsr_burn: COST,
+        momentum_rewards: 50,
+        delegate_rewards: 75,
+        is_legacy: false,
+      }),
+    );
   });
 
-  it('throws on empty name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: '' } });
-    await expect(register(ctx)).rejects.toThrow('name is empty');
-  });
+  it('takes the pillar cost from the owner deposit in the pillar contract', async () => {
+    tx.resolveNext({ c: '5' }); // count query
+    tx.resolveNext({ id: 42 }); // insert pillar
+    tx.resolveNext({ id: 7, amount: (COST + 100n).toString() }); // deposit lookup
+    tx.resolveNext({}); // deposit update
 
-  it('throws on missing producerAddress', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, producerAddress: undefined } });
-    await expect(register(ctx)).rejects.toThrow('missing required field "producerAddress"');
-  });
+    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
+    await register(ctx);
 
-  it('throws on missing giveBlockRewardPercentage', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, giveBlockRewardPercentage: undefined } });
-    await expect(register(ctx)).rejects.toThrow('missing required field');
+    expect(tx.mock.results[2].value.where).toHaveBeenCalledWith({
+      account_id: 1,
+      contract_account_id: 2,
+    });
+    expect(tx.mock.results[3].value.update).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: '100' }),
+    );
   });
 });

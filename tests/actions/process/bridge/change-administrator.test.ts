@@ -1,73 +1,86 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { BRIDGE_ADMINISTRATOR_DELAY } from '../../../../src/constants/zenon.js';
+import { argsFor } from './helpers.js';
 
+const passTimeChallenge = vi.fn();
 vi.mock('../../../../src/actions/process/bridge/time-challenge.js', () => ({
-  checkTimeChallenge: vi.fn(async () => ({ isActive: false })),
-  assertNoActiveChallenge: vi.fn(async () => true),
+  passTimeChallenge: (...args: any[]) => passTimeChallenge(...args),
 }));
 
-const { changeAdministrator } = await import('../../../../src/actions/process/bridge/change-administrator.js');
-const { checkTimeChallenge, assertNoActiveChallenge } = await import('../../../../src/actions/process/bridge/time-challenge.js');
+const getOrCreate = vi.fn();
+vi.mock('../../../../src/services/registries/account-registry.js', () => ({
+  accountRegistry: { getOrCreate: (...args: any[]) => getOrCreate(...args) },
+}));
+
+const { makeChangeAdministrator } =
+  await import('../../../../src/actions/process/bridge/change-administrator.js');
+const { BRIDGE_GOVERNANCE, LIQUIDITY_GOVERNANCE } =
+  await import('../../../../src/actions/process/bridge/governance.js');
+const changeAdministrator = makeChangeAdministrator(BRIDGE_GOVERNANCE);
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('changeAdministrator', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   beforeEach(() => {
     tx = makeMockTx();
-    vi.mocked(checkTimeChallenge).mockReset();
-    vi.mocked(checkTimeChallenge).mockResolvedValue({ isActive: false });
-    vi.mocked(assertNoActiveChallenge).mockReset();
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(true);
+    passTimeChallenge.mockReset();
+    getOrCreate.mockReset();
+    getOrCreate.mockResolvedValue(8);
   });
 
-  it('changes admin after time challenge', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({ id: 50 });        // new admin account lookup
-    tx.resolveNext({});                 // del pending
-    tx.resolveNext({});                 // revoke current admin
-    tx.resolveNext({});                 // insert new admin
+  const run = () =>
+    changeAdministrator(
+      makeActionContext({
+        tx,
+        decoded: { administrator: 'z1newadmin' },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { administrator: 'z1qnewadmin' },
-    });
-    await expect(changeAdministrator(ctx)).resolves.toBeUndefined();
+  it('only starts the time challenge on the first call', async () => {
+    passTimeChallenge.mockResolvedValue(false);
+
+    await run();
+
+    expect(passTimeChallenge).toHaveBeenCalledWith(
+      expect.anything(),
+      BRIDGE_GOVERNANCE,
+      'ChangeAdministrator',
+      'z1newadmin',
+      BRIDGE_ADMINISTRATOR_DELAY,
+    );
+    expect(tx).not.toHaveBeenCalled();
   });
 
-  it('throws on missing administrator', async () => {
-    const ctx = makeActionContext({ tx, decoded: {} });
-    await expect(changeAdministrator(ctx)).rejects.toThrow('missing required field');
+  it('revokes the current administrator and accepts the new one', async () => {
+    passTimeChallenge.mockResolvedValue(true);
+
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_admins', 'update')).toEqual([{ revoked_at: CREATED_AT }]);
+    expect(argsFor(tx, 'nom_bridge_admins', 'insert')).toEqual([
+      { account_id: 8, accepted_at: CREATED_AT },
+    ]);
   });
 
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('writes the liquidity contract administrators to their own table', async () => {
+    passTimeChallenge.mockResolvedValue(true);
 
-    const ctx = makeActionContext({ tx, decoded: { administrator: 'z1qnewadmin' } });
-    await changeAdministrator(ctx);
+    await makeChangeAdministrator(LIQUIDITY_GOVERNANCE)(
+      makeActionContext({
+        tx,
+        decoded: { administrator: 'z1newadmin' },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('skips if time challenge active', async () => {
-    tx.resolveNext({ account_id: 1 });
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(false);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { administrator: 'z1qnewadmin' } });
-    await changeAdministrator(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('time challenge'));
-  });
-
-  it('warns if new admin account not found', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { administrator: 'z1qnewadmin' } });
-    await changeAdministrator(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('account not found'));
+    expect(passTimeChallenge.mock.calls[0][1]).toBe(LIQUIDITY_GOVERNANCE);
+    expect(argsFor(tx, 'nom_liquidity_admins', 'insert')).toEqual([
+      { account_id: 8, accepted_at: CREATED_AT },
+    ]);
+    expect(argsFor(tx, 'nom_bridge_admins', 'insert')).toEqual([]);
   });
 });

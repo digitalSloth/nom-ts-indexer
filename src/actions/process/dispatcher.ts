@@ -1,15 +1,18 @@
 import { contractRegistry } from '../../services/registries/contract-registry.js';
 import { getHandler, warnMissingOnce } from './registry.js';
-import type { ActionContext, KnexTransactionClient } from './types.js';
+import type { ActionContext, FrontierMomentum, KnexTransactionClient } from './types.js';
 import type { LinkedBlock } from '../indexer/insert-account-block.js';
 
 /**
- * Dispatch a contract-receive block to its action handler.
+ * Dispatch a successful contract call to its action handler. The caller only
+ * dispatches receive blocks whose call status is success, so a handler never
+ * needs to repeat the contract's own validation.
  */
 export async function dispatchAction(
   tx: KnexTransactionClient,
   receiveBlock: LinkedBlock,
   sendBlock: LinkedBlock,
+  frontierMomentum: FrontierMomentum,
 ): Promise<void> {
   const method = contractRegistry.getMethod(sendBlock.contractMethodId);
   if (!method) {
@@ -22,20 +25,16 @@ export async function dispatchAction(
     return;
   }
 
-  let parsed: Record<string, any>;
-  try {
-    const row = await tx('nom_account_block_data')
-      .select('decoded')
-      .where('account_block_id', sendBlock.id)
-      .first();
-    if (!row?.decoded) return;
-    parsed = JSON.parse(row.decoded);
-  } catch (err) {
-    console.error(
-      `Failed to parse decoded JSON for send block ${sendBlock.hash}: ${(err as Error).message}`,
+  const row = await tx('nom_account_block_data')
+    .select('decoded')
+    .where('account_block_id', sendBlock.id)
+    .first();
+  if (!row?.decoded) {
+    throw new Error(
+      `${method.contractName}.${method.methodName}: send block ${sendBlock.hash} has no decoded data`,
     );
-    return;
   }
+  const parsed: Record<string, any> = JSON.parse(row.decoded);
 
   const ctx: ActionContext = {
     tx,
@@ -44,6 +43,7 @@ export async function dispatchAction(
       momentumId: receiveBlock.momentumId,
       createdAt: receiveBlock.createdAt,
     },
+    frontierMomentum,
     sendBlock: {
       id: sendBlock.id,
       accountId: sendBlock.accountId,

@@ -1,25 +1,30 @@
 import { AcceleratorProjectVote } from 'znn-typescript-sdk';
+import { bareHex } from '../htlc/hex.js';
+import { refreshPillarEngagement } from '../../indexer/pillar-metrics.js';
 
 /**
  * Resolves a votable item by hash, trying project first then phase.
- * Returns { votableType, votable } or null if not found.
+ * Accepts the decoded 0x-prefixed hash. Returns { votableType, votable }
+ * or null if not found.
  */
 export async function resolveVotable(
   tx: any,
   itemHash: string,
 ): Promise<{ votableType: string; votable: { id: number } } | null> {
+  const hash = bareHex(itemHash);
   let votableType = 'AcceleratorProject';
-  let votable = await tx('nom_accelerator_projects').where({ hash: itemHash }).select('id').first();
+  let votable = await tx('nom_accelerator_projects').where({ hash }).select('id').first();
   if (!votable) {
     votableType = 'AcceleratorPhase';
-    votable = await tx('nom_accelerator_phases').where({ hash: itemHash }).select('id').first();
+    votable = await tx('nom_accelerator_phases').where({ hash }).select('id').first();
   }
   if (!votable) return null;
   return { votableType, votable };
 }
 
 /**
- * Upserts a vote: updates if one exists for this pillar+votable, creates otherwise.
+ * Upserts a vote: updates if one exists for this pillar+votable, creates
+ * otherwise. Then recomputes the pillar's engagement.
  */
 export async function upsertVote(
   tx: any,
@@ -53,6 +58,8 @@ export async function upsertVote(
       created_at: createdAt,
     });
   }
+
+  await refreshPillarEngagement(tx, [pillarId]);
 }
 
 /**

@@ -2,6 +2,8 @@ import type { Knex } from 'knex';
 import { config } from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { databaseSsl } from './ssl.js';
+import { INDEXER_SCHEMA } from './schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,7 +18,9 @@ const knexConfig: Knex.Config = {
     user: process.env.DATABASE_USER || 'postgres',
     password: process.env.DATABASE_PASSWORD || '',
     database: process.env.DATABASE_NAME || 'zenon_indexer',
+    ssl: databaseSsl(),
   },
+  searchPath: [INDEXER_SCHEMA],
   pool: {
     min: 2,
     max: parseInt(process.env.DB_MAX_CONNECTIONS || '10', 10),

@@ -27,6 +27,7 @@ import {
   SwapContract,
   TokenContract,
 } from 'znn-typescript-sdk';
+import { PTLC_ADDRESS, PtlcContract } from './ptlc-contract.js';
 
 /**
  * Zenon Network Constants
@@ -63,6 +64,7 @@ export const EMBEDDED_CONTRACTS: EmbeddedContractEntry[] = [
   },
   { address: BRIDGE_ADDRESS.toString(), name: 'Bridge Contract', contractClass: BridgeContract },
   { address: HTLC_ADDRESS.toString(), name: 'HTLC Contract', contractClass: HtlcContract },
+  { address: PTLC_ADDRESS, name: 'PTLC Contract', contractClass: PtlcContract },
   { address: null, name: 'Common', contractClass: CommonContract },
 ];
 
@@ -72,7 +74,11 @@ export function getEmbeddedContractByName(name: string): EmbeddedContractEntry |
 
 // Special addresses
 export const BURN_ADDRESS = EMPTY_ADDRESS.toString();
-export const BRIDGE_ADMIN_ADDRESS = 'z1qzal6c5s9rjnnxd2z7dvdhjxpmmj4fmw56a0mz';
+// The bridge and liquidity contracts' starting administrator (go-zenon
+// constants.InitialBridgeAdministrator)
+export const INITIAL_ADMINISTRATOR_ADDRESS = 'z1qr9vtwsfr2n0nsxl2nfh6l5esqjh2wfj85cfq9';
+// Mainnet liquidity program: QSR sent from this address are rewards.
+export const LIQUIDITY_PROGRAM_DISTRIBUTOR_ADDRESS = 'z1qqw8f3qxx9zg92xgckqdpfws3dw07d26afsj74';
 
 // Token standards
 export const ZNN_TOKEN_STANDARD = ZNN_ZTS.toString();
@@ -83,16 +89,16 @@ export const DECIMALS = 100000000; // 10^8
 
 // Accelerator
 export const ACCELERATOR_PROJECT_VOTING_PERIOD = 14 * 24 * 60 * 60; // 14 days in seconds
-export const ACCELERATOR_NAME_MAX_LENGTH = 30;
-export const ACCELERATOR_DESCRIPTION_MAX_LENGTH = 240;
-export const ACCELERATOR_ZNN_MAXIMUM_FUNDS = 5000n * BigInt(DECIMALS);
-export const ACCELERATOR_QSR_MAXIMUM_FUNDS = 50000n * BigInt(DECIMALS);
 export const ACCELERATOR_PROJECT_CREATION_AMOUNT = 1n * BigInt(DECIMALS);
 export const ACCELERATOR_VOTE_ACCEPTANCE_THRESHOLD = 33;
 
 // Bridge
 export const BRIDGE_SOFT_DELAY = 8640; // MomentumsPerEpoch (360 * 24)
 export const BRIDGE_ADMINISTRATOR_DELAY = 17280; // 2 * MomentumsPerEpoch
+
+// Plasma
+// go-zenon FuseExpiration (vm/constants/embedded.go): MomentumsPerHour * 10
+export const FUSE_EXPIRATION_MOMENTUMS = 3600n;
 
 // Pillar
 export const PILLAR_QSR_STAKE_BASE_AMOUNT = 150_000n * 100_000_000n;

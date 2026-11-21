@@ -1,30 +1,21 @@
 import type { ActionContext, ActionHandler } from '../types.js';
-import { assertRequiredFields } from '../../../helpers/assert-required.js';
 import { resolveVotable, upsertVote, recountVotes } from './vote-helpers.js';
 
 export const voteByName: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, decoded, sendBlock, receiveBlock } = ctx;
-
-  assertRequiredFields(decoded, ['id', 'name', 'vote'], 'Accelerator.VoteByName');
+  const { tx, decoded, receiveBlock } = ctx;
 
   const pillar = await tx('nom_pillars')
     .where({ name: decoded.name })
+    .whereNull('revoked_at')
     .select('id', 'owner_id')
     .first();
   if (!pillar) {
-    console.warn(`Accelerator.VoteByName: pillar "${decoded.name}" not found`);
-    return;
-  }
-
-  if (pillar.owner_id !== sendBlock.accountId) {
-    console.warn('Accelerator.VoteByName: sender is not pillar owner');
-    return;
+    throw new Error(`Accelerator.VoteByName: active pillar not found for name ${decoded.name}`);
   }
 
   const resolved = await resolveVotable(tx, decoded.id as string);
   if (!resolved) {
-    console.warn(`Accelerator.VoteByName: votable item not found for hash ${decoded.id}`);
-    return;
+    throw new Error(`Accelerator.VoteByName: votable item not found for hash ${decoded.id}`);
   }
 
   await upsertVote(tx, {

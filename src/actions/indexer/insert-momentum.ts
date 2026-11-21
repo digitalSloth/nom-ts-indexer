@@ -2,6 +2,8 @@ import type { Momentum } from 'znn-typescript-sdk';
 import { accountRegistry } from '../../services/registries/account-registry.js';
 import { pillarRegistry } from '../../services/registries/pillar-registry.js';
 import type { IndexedMomentumEvent } from '../../plugins/types.js';
+import { recordPillarProduction } from './pillar-metrics.js';
+import { settleTimeChallenges } from './settle-time-challenges.js';
 
 /**
  * Insert a momentum (block) into the database.
@@ -28,6 +30,13 @@ export async function insertMomentum(
     .onConflict('hash')
     .merge()
     .returning('id');
+
+  // The indexer inserts each momentum once. The genesis backfill can insert
+  // momentum 1 again, which has no producer pillar.
+  const height = BigInt(momentumData.height);
+  const createdAt = new Date(momentumData.timestamp * 1000);
+  await recordPillarProduction(tx, pillarId ?? null, height, createdAt);
+  await settleTimeChallenges(tx, height, createdAt);
 
   return {
     momentumId: result[0].id,

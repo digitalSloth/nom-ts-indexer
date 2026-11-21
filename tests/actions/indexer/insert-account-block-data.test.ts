@@ -23,7 +23,8 @@ vi.mock('../../../src/constants/zenon.js', async (importOriginal) => {
 let insertAccountBlockData: typeof import('../../../src/actions/indexer/insert-account-block-data.js').insertAccountBlockData;
 
 beforeEach(async () => {
-  ({ insertAccountBlockData } = await import('../../../src/actions/indexer/insert-account-block-data.js'));
+  ({ insertAccountBlockData } =
+    await import('../../../src/actions/indexer/insert-account-block-data.js'));
   getContractName.mockReset();
   getMethodId.mockReset();
   getEmbeddedContractByName.mockReset();
@@ -78,12 +79,41 @@ describe('insertAccountBlockData', () => {
     expect(result.decodedArgs).toEqual({ foo: 'bar' });
   });
 
+  it('stores integers above 2^64 from a real Mint call as exact decimal strings', async () => {
+    const { TokenContract } = await import('znn-typescript-sdk');
+    const amount = 2n ** 70n + 12345n;
+    const callData = TokenContract.encodeCall('Mint', [
+      'zts1znnxxxxxxxxxxxxx9z4ulx',
+      amount,
+      'z1qqjnwjjpnue8xmmpanz6csze6tcmtzzdtfsww7',
+    ]);
+
+    getContractName.mockReturnValue('Token Contract');
+    getMethodId.mockReturnValue(7);
+    getEmbeddedContractByName.mockReturnValue({ contractClass: TokenContract });
+
+    const data = Buffer.from(callData.replace(/^0x/, ''), 'hex');
+    const result = await insertAccountBlockData(tx, 1, 2, makeBlock(data));
+
+    const expected = {
+      tokenStandard: 'zts1znnxxxxxxxxxxxxx9z4ulx',
+      amount: amount.toString(),
+      receiveAddress: 'z1qqjnwjjpnue8xmmpanz6csze6tcmtzzdtfsww7',
+    };
+    expect(result.decodedArgs).toEqual(expected);
+
+    const stored = (tx.lastBuilder().insert as any).mock.calls[0][0];
+    expect(JSON.parse(stored.decoded)).toEqual(expected);
+  });
+
   it('stores null decoded when decode throws', async () => {
     getContractName.mockReturnValue('Plasma Contract');
     getMethodId.mockReturnValue(42);
     getEmbeddedContractByName.mockReturnValue({
       contractClass: {
-        decodeCallData: () => { throw new Error('boom'); },
+        decodeCallData: () => {
+          throw new Error('boom');
+        },
       },
     });
 

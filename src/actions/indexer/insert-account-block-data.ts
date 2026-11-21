@@ -1,6 +1,7 @@
 import type { AccountBlock } from 'znn-typescript-sdk';
 import { getEmbeddedContractByName } from '../../constants/zenon.js';
 import { contractRegistry } from '../../services/registries/contract-registry.js';
+import { blockDataBuffer } from './contract-call-status.js';
 
 export interface InsertedBlockData {
   rawData: Buffer<ArrayBuffer>;
@@ -18,9 +19,7 @@ export async function insertAccountBlockData(
   toAccountId: number,
   accountBlockData: AccountBlock,
 ): Promise<InsertedBlockData> {
-  const rawInput = accountBlockData.data!;
-  const buf: Buffer<ArrayBuffer> =
-    typeof rawInput === 'string' ? Buffer.from(rawInput, 'base64') : Buffer.from(rawInput as any);
+  const buf = blockDataBuffer(accountBlockData.data);
   const rawBase64 = buf.toString('base64');
 
   let decodedArgs: Record<string, unknown> | null = null;
@@ -41,7 +40,7 @@ export async function insertAccountBlockData(
           const args = decoded.args;
           decodedArgs =
             args && typeof args === 'object' && !Array.isArray(args)
-              ? (args as Record<string, unknown>)
+              ? (bigintsToStrings(args) as Record<string, unknown>)
               : null;
         } catch {
           decodedArgs = null;
@@ -72,10 +71,26 @@ export async function insertAccountBlockData(
     .insert({
       account_block_id: accountBlockId,
       raw: rawBase64,
-      decoded: decodedArgs ? JSON.stringify(decodedArgs) : null
+      decoded: decodedArgs ? JSON.stringify(decodedArgs) : null,
     })
     .onConflict('account_block_id')
     .merge();
 
   return { rawData: buf, decodedArgs, contractMethodId };
+}
+
+/**
+ * The SDK decodes integers wider than 48 bits as `bigint`, which
+ * JSON.stringify rejects. Convert them to decimal strings at any depth so
+ * the stored JSON and the plugin event carry the same shape.
+ */
+function bigintsToStrings(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(bigintsToStrings);
+  if (value !== null && typeof value === 'object' && value.constructor === Object) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, bigintsToStrings(item)]),
+    );
+  }
+  return value;
 }

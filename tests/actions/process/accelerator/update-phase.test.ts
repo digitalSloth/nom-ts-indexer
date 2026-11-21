@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 
 const { updatePhase } = await import('../../../../src/actions/process/accelerator/update-phase.js');
@@ -7,7 +7,8 @@ describe('updatePhase', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   const defaultDecoded = {
-    id: 'projecthash123',
+    // Decoded hash args are 0x-prefixed; rows store bare hex
+    id: '0xprojecthash123',
     name: 'Updated Phase',
     description: 'Updated description',
     url: 'https://example.com/updated',
@@ -19,70 +20,51 @@ describe('updatePhase', () => {
     tx = makeMockTx();
   });
 
-  it('updates a phase in voting status', async () => {
-    // 1. find project by hash → .first()
-    tx.resolveNext({ id: 1, owner_id: 1 });
-    // 2. find latest phase → .first()
-    tx.resolveNext({ id: 10, status: 0 });
+  it('replaces the current phase and deletes its votes', async () => {
+    tx.resolveNext({ id: 1 }); // project
+    tx.resolveNext({ id: 10 }); // current phase
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePhase(ctx);
+    await updatePhase(makeActionContext({ tx, decoded: defaultDecoded }));
 
-    // Verify the correct tables were queried
-    expect(tx).toHaveBeenCalledWith('nom_accelerator_projects');
-    expect(tx).toHaveBeenCalledWith('nom_accelerator_phases');
+    const builders = tx.mock.results.map((r: any) => r.value);
+    const phaseUpdate = builders[2].update.mock.calls[0][0];
+    expect(phaseUpdate).toMatchObject({
+      hash: 'sendblockhash123',
+      name: 'Updated Phase',
+      znn_requested: 500000000n,
+      qsr_requested: 2500000000n,
+      total_votes: 0,
+      total_yes_votes: 0,
+      total_no_votes: 0,
+      total_abstain_votes: 0,
+      created_at: new Date('2024-01-01T00:00:00Z'),
+    });
     expect(tx).toHaveBeenCalledWith('nom_votes');
+    expect(builders[3].del).toHaveBeenCalled();
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: undefined } });
-    await expect(updatePhase(ctx)).rejects.toThrow('missing required field');
+  it('throws when the project is not indexed', async () => {
+    tx.resolveNext(null);
+
+    await expect(updatePhase(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Accelerator.UpdatePhase: project not found for hash projecthash123',
+    );
   });
 
-  it('throws on empty name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: '' } });
-    await expect(updatePhase(ctx)).rejects.toThrow('name is empty');
+  it('throws when the project has no phase', async () => {
+    tx.resolveNext({ id: 1 });
+    tx.resolveNext(null);
+
+    await expect(updatePhase(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Accelerator.UpdatePhase: phase not found for project projecthash123',
+    );
   });
 
-  it('warns if project not found', async () => {
-    tx.resolveNext(null); // project not found
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('looks up the project by its bare hash', async () => {
+    tx.resolveNext(null);
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePhase(ctx);
+    await expect(updatePhase(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow();
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('project not found'));
-  });
-
-  it('warns if sender is not project owner', async () => {
-    tx.resolveNext({ id: 1, owner_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not project owner'));
-  });
-
-  it('warns if no phase found', async () => {
-    tx.resolveNext({ id: 1, owner_id: 1 });
-    tx.resolveNext(null); // no phase
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no phase found'));
-  });
-
-  it('warns if phase is not in voting status', async () => {
-    tx.resolveNext({ id: 1, owner_id: 1 });
-    tx.resolveNext({ id: 10, status: 2 }); // paid, not voting
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await updatePhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not in voting status'));
+    expect(tx.mock.results[0].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
   });
 });

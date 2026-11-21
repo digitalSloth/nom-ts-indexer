@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type {
   ZenonIndexerPlugin,
-  PluginContext,
   IndexedAccountBlockEvent,
   IndexedMomentumEvent,
 } from '../../src/plugins/types.js';
@@ -15,7 +14,6 @@ vi.mock('../../src/config/plugins.js', () => ({
   isLocalPlugin: (entry: { package: string }) =>
     entry.package.startsWith('.') || entry.package.startsWith('/'),
 }));
-
 
 // Mock knex for plugin migrations
 const mockMigrateLatest = vi.fn().mockResolvedValue(undefined);
@@ -41,12 +39,11 @@ const chainMethods = {
   ignore: vi.fn().mockResolvedValue(undefined),
   update: vi.fn().mockResolvedValue(undefined),
 };
-const mockDb = Object.assign(
-  vi.fn().mockReturnValue({ ...chainMethods }),
-  {
-    raw: vi.fn().mockResolvedValue({ rows: [] }),
-  },
-);
+// A transaction runs its callback on the same mock
+const mockDb: any = Object.assign(vi.fn().mockReturnValue({ ...chainMethods }), {
+  raw: vi.fn().mockResolvedValue({ rows: [] }),
+});
+mockDb.transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(mockDb));
 vi.mock('../../src/database/knex.js', () => ({
   db: mockDb,
 }));
@@ -237,8 +234,149 @@ describe('PluginRegistry', () => {
     });
   });
 
-  describe('dispatchAccountBlock()', () => {
-    it('fans out to all loaded plugins', async () => {
+  describe('catchUp() block selection', () => {
+    function row(id: number, accountHeight: number, momentumHeight: number) {
+      return {
+        id,
+        hash: `block${id}`,
+        block_type: 2,
+        height: accountHeight,
+        amount: '0',
+        account_address: 'z1from',
+        to_account_address: 'z1to',
+        token_standard: null,
+        momentum_id: momentumHeight,
+        momentum_height: momentumHeight,
+        momentum_hash: `m${momentumHeight}`,
+        momentum_created_at: new Date(0),
+        data_raw: null,
+        data_decoded: null,
+        contract_method_name: null,
+        contract_name: null,
+        paired_hash: null,
+      };
+    }
+
+    /** Serve block windows from `fixture` and the plugin state from `watermark`. */
+    function serveChain(fixture: any[], watermark: string) {
+      const blockQuery: any = {
+        range: null as null | { column: string; from: number; to: number },
+        leftJoin() {
+          return this;
+        },
+        select() {
+          return this;
+        },
+        orderBy() {
+          return this;
+        },
+        whereBetween(column: string, [from, to]: [string, string]) {
+          this.range = { column, from: Number(from), to: Number(to) };
+          return this;
+        },
+        then(resolve: any) {
+          const { column, from, to } = this.range;
+          const key = column === 'mom.height' ? 'momentum_height' : 'height';
+          return Promise.resolve(fixture.filter((r: any) => r[key] >= from && r[key] <= to)).then(
+            resolve,
+          );
+        },
+      };
+      const update = vi.fn().mockResolvedValue(undefined);
+      const stateQuery = {
+        select: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        first: vi.fn().mockResolvedValue({ watermark }),
+        insert: vi.fn().mockReturnThis(),
+        onConflict: vi.fn().mockReturnThis(),
+        ignore: vi.fn().mockResolvedValue(undefined),
+        update,
+      };
+      mockDb.mockImplementation((table: string) =>
+        table === 'nom_account_blocks as ab' ? { ...blockQuery } : stateQuery,
+      );
+      return { update };
+    }
+
+    it('selects blocks by momentum height, not account-chain height', async () => {
+      const { update } = serveChain([row(1, 50, 11), row(2, 1, 12), row(3, 11, 500)], '10');
+      const plugin = makePlugin({ name: 'window-plugin' });
+      vi.doMock('window-plugin', () => ({ default: () => plugin }));
+      mockConfig = [{ package: 'window-plugin', enabled: true, config: {} }];
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      await pluginRegistry.catchUp(BigInt(12));
+
+      const hashes = (plugin.onAccountBlock as any).mock.calls.map((c: any[]) => c[0].hash);
+      expect(hashes).toEqual(['block1', 'block2']);
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ watermark: '12' }));
+    });
+
+    it('delivers block and momentum heights as bigint, as live dispatch does', async () => {
+      // pg returns bigint columns as strings
+      const fixture = [{ ...row(1, 50, 11), height: '50', momentum_height: '11' }];
+      serveChain(fixture, '10');
+      const plugin = makePlugin({ name: 'window-plugin' });
+      vi.doMock('window-plugin', () => ({ default: () => plugin }));
+      mockConfig = [{ package: 'window-plugin', enabled: true, config: {} }];
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      await pluginRegistry.catchUp(BigInt(11));
+
+      const event = (plugin.onAccountBlock as any).mock.calls[0][0];
+      expect(event.height).toBe(50n);
+      expect(event.momentum.height).toBe(11n);
+    });
+
+    it('saves the watermark after each window', async () => {
+      const { update } = serveChain([row(1, 1, 500), row(2, 1, 1500), row(3, 1, 2200)], '0');
+      const plugin = makePlugin({ name: 'window-plugin' });
+      vi.doMock('window-plugin', () => ({ default: () => plugin }));
+      mockConfig = [{ package: 'window-plugin', enabled: true, config: {} }];
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      await pluginRegistry.catchUp(BigInt(2500));
+
+      const watermarks = update.mock.calls.map((c: any[]) => c[0].watermark);
+      expect(watermarks).toEqual(['1000', '2000', '2500']);
+    });
+
+    it('keeps the last finished window and disables the plugin when replay fails', async () => {
+      const { update } = serveChain([row(1, 1, 500), row(2, 1, 1500), row(3, 1, 2200)], '0');
+      const plugin = makePlugin({
+        name: 'failing-plugin',
+        onAccountBlock: vi.fn(async (event: IndexedAccountBlockEvent) => {
+          if (event.hash === 'block2') throw new Error('boom');
+        }),
+      });
+      vi.doMock('failing-plugin', () => ({ default: () => plugin }));
+      mockConfig = [{ package: 'failing-plugin', enabled: true, config: {} }];
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      await pluginRegistry.catchUp(BigInt(2500));
+
+      expect(update.mock.calls.map((c: any[]) => c[0].watermark)).toEqual(['1000']);
+      expect(plugin.shutdown).toHaveBeenCalled();
+
+      // Live dispatch no longer reaches the plugin or moves its watermark
+      await pluginRegistry.dispatchMomentum(
+        { height: BigInt(2501), hash: 'm2501' } as IndexedMomentumEvent,
+        [{ hash: 'block4' } as IndexedAccountBlockEvent],
+      );
+      expect(plugin.onAccountBlock).toHaveBeenCalledTimes(2);
+      expect(plugin.onMomentum).not.toHaveBeenCalled();
+      expect(update).toHaveBeenCalledTimes(1);
+      errorSpy.mockRestore();
+    });
+  });
+
+  describe('dispatchMomentum() account blocks', () => {
+    it('fans out to all loaded plugins, each with its own transaction', async () => {
       const plugin1 = makePlugin({ name: 'p1' });
       const plugin2 = makePlugin({ name: 'p2' });
       vi.doMock('p1', () => ({ default: () => plugin1 }));
@@ -252,10 +390,11 @@ describe('PluginRegistry', () => {
       await pluginRegistry.load();
 
       const event = { hash: 'abc', height: BigInt(5) } as IndexedAccountBlockEvent;
-      await pluginRegistry.dispatchAccountBlock(event);
+      await pluginRegistry.dispatchMomentum({ height: BigInt(5) } as IndexedMomentumEvent, [event]);
 
-      expect(plugin1.onAccountBlock).toHaveBeenCalledWith(event);
-      expect(plugin2.onAccountBlock).toHaveBeenCalledWith(event);
+      expect(plugin1.onAccountBlock).toHaveBeenCalledWith(event, mockDb);
+      expect(plugin2.onAccountBlock).toHaveBeenCalledWith(event, mockDb);
+      expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     });
 
     it('isolates failures from individual plugins', async () => {
@@ -276,10 +415,71 @@ describe('PluginRegistry', () => {
       await pluginRegistry.load();
 
       const event = { hash: 'abc', height: BigInt(5) } as IndexedAccountBlockEvent;
-      await pluginRegistry.dispatchAccountBlock(event);
+      await pluginRegistry.dispatchMomentum({ height: BigInt(5) } as IndexedMomentumEvent, [event]);
 
-      expect(goodPlugin.onAccountBlock).toHaveBeenCalledWith(event);
+      expect(goodPlugin.onAccountBlock).toHaveBeenCalledWith(event, mockDb);
       expect(errorSpy).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+  });
+
+  describe('dispatchMomentum() halting', () => {
+    it('halts a plugin whose onAccountBlock throws and keeps its watermark', async () => {
+      const update = vi.fn().mockResolvedValue(undefined);
+      mockDb.mockReturnValue({ ...chainMethods, update });
+      const bad = makePlugin({
+        name: 'bad',
+        onAccountBlock: vi.fn().mockRejectedValue(new Error('boom')),
+      });
+      const good = makePlugin({ name: 'good' });
+      vi.doMock('bad', () => ({ default: () => bad }));
+      vi.doMock('good', () => ({ default: () => good }));
+      mockConfig = [
+        { package: 'bad', enabled: true, config: {} },
+        { package: 'good', enabled: true, config: {} },
+      ];
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+
+      await pluginRegistry.dispatchMomentum(
+        { height: BigInt(7), hash: 'm7' } as IndexedMomentumEvent,
+        [{ hash: 'b1' } as IndexedAccountBlockEvent, { hash: 'b2' } as IndexedAccountBlockEvent],
+      );
+      await pluginRegistry.dispatchMomentum(
+        { height: BigInt(8), hash: 'm8' } as IndexedMomentumEvent,
+        [{ hash: 'b3' } as IndexedAccountBlockEvent],
+      );
+
+      expect(bad.onAccountBlock).toHaveBeenCalledTimes(1);
+      expect(bad.shutdown).toHaveBeenCalledTimes(1);
+      expect(bad.onMomentum).not.toHaveBeenCalled();
+      expect(good.onAccountBlock).toHaveBeenCalledTimes(3);
+      expect(good.shutdown).not.toHaveBeenCalled();
+      expect(good.onMomentum).toHaveBeenCalledTimes(2);
+      expect(update.mock.calls.map((c: any[]) => c[0].watermark)).toEqual(['7', '8']);
+      errorSpy.mockRestore();
+    });
+
+    it('still shuts down and drops a halted plugin when its shutdown throws', async () => {
+      const bad = makePlugin({
+        name: 'bad',
+        onAccountBlock: vi.fn().mockRejectedValue(new Error('boom')),
+        shutdown: vi.fn().mockRejectedValue(new Error('shutdown boom')),
+      });
+      vi.doMock('bad', () => ({ default: () => bad }));
+      mockConfig = [{ package: 'bad', enabled: true, config: {} }];
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      const momentum = { height: BigInt(7), hash: 'm7' } as IndexedMomentumEvent;
+      await pluginRegistry.dispatchMomentum(momentum, [{ hash: 'b1' } as IndexedAccountBlockEvent]);
+      await pluginRegistry.dispatchMomentum(momentum, [{ hash: 'b2' } as IndexedAccountBlockEvent]);
+
+      expect(bad.onAccountBlock).toHaveBeenCalledTimes(1);
+      expect(bad.shutdown).toHaveBeenCalledTimes(1);
       errorSpy.mockRestore();
     });
   });
@@ -294,12 +494,14 @@ describe('PluginRegistry', () => {
       await pluginRegistry.load();
 
       const event = { height: BigInt(100), hash: 'abc' } as IndexedMomentumEvent;
-      await pluginRegistry.dispatchMomentum(event);
+      await pluginRegistry.dispatchMomentum(event, []);
 
-      expect(plugin.onMomentum).toHaveBeenCalledWith(event);
+      expect(plugin.onMomentum).toHaveBeenCalledWith(event, mockDb);
     });
 
-    it('skips plugins without onMomentum handler', async () => {
+    it('writes the watermark for a plugin without onMomentum', async () => {
+      const update = vi.fn().mockResolvedValue(undefined);
+      mockDb.mockReturnValue({ ...chainMethods, update });
       const plugin = makePlugin({ onMomentum: undefined });
       vi.doMock('no-momentum', () => ({ default: () => plugin }));
       mockConfig = [{ package: 'no-momentum', enabled: true, config: {} }];
@@ -308,7 +510,29 @@ describe('PluginRegistry', () => {
       await pluginRegistry.load();
 
       const event = { height: BigInt(100), hash: 'abc' } as IndexedMomentumEvent;
-      await pluginRegistry.dispatchMomentum(event);
+      await pluginRegistry.dispatchMomentum(event, []);
+
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ watermark: '100' }));
+    });
+
+    it('halts the plugin and keeps its watermark when onMomentum throws', async () => {
+      const update = vi.fn().mockResolvedValue(undefined);
+      mockDb.mockReturnValue({ ...chainMethods, update });
+      const plugin = makePlugin({ onMomentum: vi.fn().mockRejectedValue(new Error('boom')) });
+      vi.doMock('failing-momentum', () => ({ default: () => plugin }));
+      mockConfig = [{ package: 'failing-momentum', enabled: true, config: {} }];
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { pluginRegistry } = await import('../../src/services/plugin-registry.js');
+      await pluginRegistry.load();
+      await pluginRegistry.dispatchMomentum(
+        { height: BigInt(100), hash: 'abc' } as IndexedMomentumEvent,
+        [],
+      );
+
+      expect(update).not.toHaveBeenCalled();
+      expect(plugin.shutdown).toHaveBeenCalledTimes(1);
+      errorSpy.mockRestore();
     });
   });
 

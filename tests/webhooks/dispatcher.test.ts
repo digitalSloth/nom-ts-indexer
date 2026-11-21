@@ -52,11 +52,13 @@ describe('WebhookDispatcher', () => {
 
   it('includes HMAC signature when secret is set', async () => {
     mockFetch.mockResolvedValue({ ok: true });
-    const d = make([{
-      url: 'https://example.com/hook',
-      events: ['momentum.inserted'],
-      secret: 'mysecret',
-    }]);
+    const d = make([
+      {
+        url: 'https://example.com/hook',
+        events: ['momentum.inserted'],
+        secret: 'mysecret',
+      },
+    ]);
 
     d.dispatch('momentum.inserted', { height: '1' });
     await vi.advanceTimersByTimeAsync(0);

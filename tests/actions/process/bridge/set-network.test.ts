@@ -1,72 +1,69 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor, buildersFor } from './helpers.js';
 
 const { setNetwork } = await import('../../../../src/actions/process/bridge/set-network.js');
 
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
+
 describe('setNetwork', () => {
   let tx: ReturnType<typeof makeMockTx>;
-
-  const defaultDecoded = {
-    networkClass: 1,
-    chainId: 1,
-    name: 'Ethereum',
-    contractAddress: '0x1234567890abcdef1234567890abcdef12345678',
-  };
 
   beforeEach(() => {
     tx = makeMockTx();
   });
 
-  it('creates new network', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext(null);              // findActiveBridgeNetwork
-    tx.resolveNext({});                // insert
+  const run = () =>
+    setNetwork(
+      makeActionContext({
+        tx,
+        decoded: {
+          networkClass: 2,
+          chainId: 1,
+          name: 'Ethereum',
+          contractAddress: '0xabc',
+          metadata: '{"a":1}',
+        },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(setNetwork(ctx)).resolves.toBeUndefined();
+  it('creates a new network and stores the metadata string as is', async () => {
+    tx.resolveNext(null); // no existing network
+    tx.resolveNext({});
+
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_networks', 'insert')).toEqual([
+      {
+        network_class: 2n,
+        chain_identifier: 1n,
+        name: 'Ethereum',
+        contract_address: '0xabc',
+        meta_data: '{"a":1}',
+        created_at: CREATED_AT,
+      },
+    ]);
   });
 
-  it('updates existing network and clears deleted_at', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({ id: 10, deleted_at: new Date() }); // findActiveBridgeNetwork
-    tx.resolveNext({});                // update
+  it('replaces an existing network and clears its token pairs', async () => {
+    tx.resolveNext({ id: 9 });
+    tx.resolveNext({});
+    tx.resolveNext({});
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(setNetwork(ctx)).resolves.toBeUndefined();
-  });
+    await run();
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: undefined } });
-    await expect(setNetwork(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await setNetwork(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('warns if name length invalid', async () => {
-    tx.resolveNext({ account_id: 1 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: 'AB' } });
-    await setNetwork(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalid name length'));
-  });
-
-  it('warns if networkClass < 1', async () => {
-    tx.resolveNext({ account_id: 1 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, networkClass: -1 } });
-    await setNetwork(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalid networkClass'));
+    expect(argsFor(tx, 'nom_bridge_networks', 'update')).toEqual([
+      {
+        name: 'Ethereum',
+        contract_address: '0xabc',
+        meta_data: '{"a":1}',
+        updated_at: CREATED_AT,
+        deleted_at: null,
+      },
+    ]);
+    const [tokens] = buildersFor(tx, 'nom_bridge_network_tokens');
+    expect(tokens.where).toHaveBeenCalledWith({ bridge_network_id: 9 });
+    expect(tokens.del).toHaveBeenCalled();
   });
 });

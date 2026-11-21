@@ -1,134 +1,99 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { makeMockTx } from '../../../helpers/mock-action-context.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createHash } from 'crypto';
+import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor, buildersFor } from './helpers.js';
 
-const { checkTimeChallenge, assertNoActiveChallenge } = await import('../../../../src/actions/process/bridge/time-challenge.js');
+const { passTimeChallenge } =
+  await import('../../../../src/actions/process/bridge/time-challenge.js');
+const { BRIDGE_GOVERNANCE, LIQUIDITY_GOVERNANCE } =
+  await import('../../../../src/actions/process/bridge/governance.js');
 
-describe('checkTimeChallenge', () => {
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
+
+describe('passTimeChallenge', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   beforeEach(() => {
     tx = makeMockTx();
   });
 
-  it('returns inactive when contract method not found', async () => {
-    tx.resolveNext(null);  // contract method lookup
+  const run = (height = 500n, contract = BRIDGE_GOVERNANCE) =>
+    passTimeChallenge(
+      makeActionContext({
+        tx,
+        receiveBlock: { id: 5, createdAt: CREATED_AT },
+        frontierMomentum: { height },
+      }),
+      contract,
+      'SetTokenPair',
+      'params',
+      100,
+    );
 
-    const result = await checkTimeChallenge(tx, 'SetTokenPair', '{}', 100, BigInt(50), new Date());
+  it('starts a challenge at the frontier momentum height and does not apply', async () => {
+    tx.resolveNext({ id: 3 }); // bridge contract method
+    tx.resolveNext(null); // no active challenge
 
-    expect(result).toEqual({ isActive: false });
+    await expect(run()).resolves.toBe(false);
+
+    expect(argsFor(tx, 'nom_time_challenges', 'insert')).toEqual([
+      {
+        contract_method_id: 3,
+        hash: sha256('params'),
+        delay: 100n,
+        start_height: 500n,
+        end_height: 600n,
+        expires_at: expect.anything(),
+        created_at: CREATED_AT,
+        is_active: true,
+      },
+    ]);
+    const [expiry] = buildersFor(tx, 'nom_momentums');
+    expect(expiry.where).toHaveBeenCalledWith({ height: 601n });
   });
 
-  it('creates new challenge and returns active', async () => {
-    tx.resolveNext({ id: 1 });  // contract method lookup
-    tx.resolveNext(null);        // time challenge lookup (not found)
-    tx.resolveNext({});          // insert challenge
+  it('applies and clears the challenge when the params match', async () => {
+    tx.resolveNext({ id: 3 });
+    tx.resolveNext({ id: 9, hash: sha256('params') });
 
-    const result = await checkTimeChallenge(tx, 'SetTokenPair', '{}', 100, BigInt(50), new Date('2024-01-01'));
+    await expect(run()).resolves.toBe(true);
 
-    expect(result).toEqual({ isActive: true });
+    expect(argsFor(tx, 'nom_time_challenges', 'update')).toEqual([{ is_active: false }]);
   });
 
-  it('returns active when challenge not expired', async () => {
-    tx.resolveNext({ id: 1 });  // contract method lookup
-    const { createHash } = await import('crypto');
-    const hash = createHash('sha256').update('{}').digest('hex');
-    tx.resolveNext({              // time challenge lookup
-      id: 10,
-      hash,
-      start_height: BigInt(50),
-      end_height: BigInt(150),
+  it('restarts the challenge when the params differ', async () => {
+    tx.resolveNext({ id: 3 });
+    tx.resolveNext({ id: 9, hash: sha256('other') });
+
+    await expect(run(700n)).resolves.toBe(false);
+
+    expect(argsFor(tx, 'nom_time_challenges', 'update')).toEqual([
+      {
+        hash: sha256('params'),
+        delay: 100n,
+        start_height: 700n,
+        end_height: 800n,
+        expires_at: expect.anything(),
+        created_at: CREATED_AT,
+      },
+    ]);
+  });
+
+  it('throws when the bridge contract method is not found', async () => {
+    tx.resolveNext(null);
+    await expect(run()).rejects.toThrow('Bridge.SetTokenPair: contract method not found');
+  });
+
+  it('looks up the method on the given contract, since both contracts share method names', async () => {
+    tx.resolveNext({ id: 4 });
+    tx.resolveNext(null);
+
+    await run(500n, LIQUIDITY_GOVERNANCE);
+
+    expect(tx.mock.results[0].value.where).toHaveBeenCalledWith({
+      'c.name': 'Liquidity Contract',
+      'cm.name': 'SetTokenPair',
     });
-
-    const result = await checkTimeChallenge(tx, 'SetTokenPair', '{}', 100, BigInt(100), new Date());
-
-    expect(result).toEqual({ isActive: true });
-  });
-
-  it('returns inactive when challenge expired', async () => {
-    const { createHash } = await import('crypto');
-    const hash = createHash('sha256').update('{}').digest('hex');
-    tx.resolveNext({ id: 1 });  // contract method lookup
-    tx.resolveNext({              // time challenge lookup
-      id: 10,
-      hash,
-      start_height: BigInt(50),
-      end_height: BigInt(150),
-    });
-    tx.resolveNext({});          // update (deactivate)
-
-    // momentumHeight (200) >= end_height (150) → expired
-    const result = await checkTimeChallenge(tx, 'SetTokenPair', '{}', 100, BigInt(200), new Date());
-
-    expect(result).toEqual({ isActive: false });
-  });
-
-  it('resets challenge when hash changes', async () => {
-    tx.resolveNext({ id: 1 });  // contract method lookup
-    tx.resolveNext({              // time challenge lookup
-      id: 10,
-      hash: 'oldhash',
-      start_height: BigInt(50),
-      end_height: BigInt(150),
-    });
-    tx.resolveNext({});          // update (reset)
-
-    const result = await checkTimeChallenge(tx, 'SetTokenPair', '{"new":"data"}', 100, BigInt(200), new Date());
-
-    expect(result).toEqual({ isActive: true });
-  });
-});
-
-describe('assertNoActiveChallenge', () => {
-  let tx: ReturnType<typeof makeMockTx>;
-
-  beforeEach(() => {
-    tx = makeMockTx();
-  });
-
-  it('returns true when momentum not found', async () => {
-    tx.resolveNext(null);  // momentum lookup
-
-    const result = await assertNoActiveChallenge(tx, { momentumId: 1 }, 'SetTokenPair', '{}', 100);
-
-    expect(result).toBe(true);
-  });
-
-  it('returns true when challenge is not active', async () => {
-    tx.resolveNext({ height: BigInt(200), created_at: new Date() }); // momentum
-    tx.resolveNext({ id: 1 });  // contract method
-    const { createHash } = await import('crypto');
-    const hash = createHash('sha256').update('{}').digest('hex');
-    tx.resolveNext({              // time challenge (expired)
-      id: 10,
-      hash,
-      start_height: BigInt(50),
-      end_height: BigInt(150),
-    });
-    tx.resolveNext({});          // update (deactivate)
-
-    const result = await assertNoActiveChallenge(tx, { momentumId: 1 }, 'SetTokenPair', '{}', 100);
-
-    expect(result).toBe(true);
-  });
-
-  it('returns false and warns when challenge is active', async () => {
-    tx.resolveNext({ height: BigInt(100), created_at: new Date() }); // momentum
-    tx.resolveNext({ id: 1 });  // contract method
-    const { createHash } = await import('crypto');
-    const hash = createHash('sha256').update('{}').digest('hex');
-    tx.resolveNext({              // time challenge (still active)
-      id: 10,
-      hash,
-      start_height: BigInt(50),
-      end_height: BigInt(150),
-    });
-
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const result = await assertNoActiveChallenge(tx, { momentumId: 1 }, 'SetTokenPair', '{}', 100);
-
-    expect(result).toBe(false);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('time challenge'));
-    warnSpy.mockRestore();
   });
 });

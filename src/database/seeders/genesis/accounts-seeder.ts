@@ -60,17 +60,22 @@ export async function seedGenesisAccounts(): Promise<void> {
       .merge()
       .returning('id');
 
-    // Track account token balances
+    // Genesis balances count as received, so balance = received - sent
     if (znnBalance > 0n) {
       await db('nom_account_tokens')
         .insert({
           account_id: account.id,
           token_id: znnToken.id,
           balance: znnBalance.toString(),
+          received: znnBalance.toString(),
           updated_at: new Date(),
         })
         .onConflict(['account_id', 'token_id'])
-        .merge({ balance: znnBalance.toString(), updated_at: new Date() });
+        .merge({
+          balance: znnBalance.toString(),
+          received: znnBalance.toString(),
+          updated_at: new Date(),
+        });
     }
 
     if (qsrBalance > 0n) {
@@ -79,10 +84,15 @@ export async function seedGenesisAccounts(): Promise<void> {
           account_id: account.id,
           token_id: qsrToken.id,
           balance: qsrBalance.toString(),
+          received: qsrBalance.toString(),
           updated_at: new Date(),
         })
         .onConflict(['account_id', 'token_id'])
-        .merge({ balance: qsrBalance.toString(), updated_at: new Date() });
+        .merge({
+          balance: qsrBalance.toString(),
+          received: qsrBalance.toString(),
+          updated_at: new Date(),
+        });
     }
 
     accountCount++;

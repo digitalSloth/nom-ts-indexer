@@ -2,26 +2,20 @@ import type { ActionContext, ActionHandler } from '../types.js';
 
 export const cancel: ActionHandler = async (ctx: ActionContext): Promise<void> => {
   const { tx, decoded, receiveBlock } = ctx;
+  const id = decoded.id.toString().replace(/^0x/, '');
 
-  if (!decoded.id) {
-    throw new Error('Stake.Cancel: missing id');
-  }
-
-  const original = await tx('nom_account_blocks')
-    .where({ hash: decoded.id.toString().replace(/^0x/, '') })
-    .select('id')
-    .first();
-  if (!original) {
-    console.warn(`Stake.Cancel: original block ${decoded.id} not found, skipping`);
-    return;
-  }
-
-  const stake = await tx('nom_stakes')
-    .where({ account_block_id: original.id, ended_at: null })
-    .select('id', 'account_id', 'amount')
+  const stake = await tx('nom_stakes as s')
+    .innerJoin('nom_account_blocks as ab', 'ab.id', 's.account_block_id')
+    .where('ab.hash', id)
+    .select('s.id', 's.ended_at')
     .first();
   if (!stake) {
-    console.warn(`Stake.Cancel: active stake row for ${decoded.id} not found, skipping`);
+    throw new Error(`Stake.Cancel: stake not found for ${id}`);
+  }
+
+  // The contract keeps a cancelled entry with a zero amount, so cancelling
+  // it again succeeds and changes nothing.
+  if (stake.ended_at) {
     return;
   }
 

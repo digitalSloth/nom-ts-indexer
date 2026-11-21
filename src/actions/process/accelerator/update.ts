@@ -5,101 +5,104 @@ import {
   ACCELERATOR_VOTE_ACCEPTANCE_THRESHOLD,
 } from '../../../constants/zenon.js';
 
-interface VotableItem {
-  id: number;
+export interface VotableItem {
   total_votes: number;
   total_yes_votes: number;
   total_no_votes: number;
-  total_abstain_votes: number;
 }
 
-function isQuorumReached(item: VotableItem, numPillars: number): boolean {
+export function isQuorumReached(item: VotableItem, numPillars: number): boolean {
   if (item.total_yes_votes <= item.total_no_votes) return false;
   if (item.total_votes * 100 <= numPillars * ACCELERATOR_VOTE_ACCEPTANCE_THRESHOLD) return false;
   return true;
 }
 
-function isVotingOpen(createdAt: Date, now: Date): boolean {
+export function isVotingOpen(createdAt: Date, now: Date): boolean {
   const createdSec = Math.floor(createdAt.getTime() / 1000);
   const nowSec = Math.floor(now.getTime() / 1000);
   return createdSec + ACCELERATOR_PROJECT_VOTING_PERIOD >= nowSec;
 }
 
-export const update: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, receiveBlock } = ctx;
+/**
+ * The contract pays a phase with a ZNN send and a QSR send from this receive,
+ * each carrying the phase id as data. It skips phases it cannot fund and caps
+ * the payouts per update, so the paid phases are read from those sends.
+ */
+async function paidPhaseHashes(tx: any, receiveBlockId: number): Promise<string[]> {
+  const rows = await tx('nom_account_blocks as ab')
+    .join('nom_account_block_data as d', 'd.account_block_id', 'ab.id')
+    .where('ab.parent_id', receiveBlockId)
+    .select('d.raw');
+  const hashes = rows.map((r: any) => Buffer.from(r.raw, 'base64').toString('hex'));
+  return [...new Set<string>(hashes)];
+}
 
-  const [projects, numPillarsRow] = await Promise.all([
-    tx('nom_accelerator_projects').whereIn('status', [
-      AcceleratorProjectStatus.voting,
-      AcceleratorProjectStatus.active,
-    ]),
-    tx('nom_pillars').count('* as c').first(),
+export const update: ActionHandler = async (ctx: ActionContext): Promise<void> => {
+  const { tx, receiveBlock, frontierMomentum } = ctx;
+  const now = frontierMomentum.timestamp;
+
+  const [votingProjects, numPillarsRow] = await Promise.all([
+    tx('nom_accelerator_projects').where({ status: AcceleratorProjectStatus.voting }),
+    tx('nom_pillars').whereNull('revoked_at').count('* as c').first(),
   ]);
   const numPillars = Number(numPillarsRow?.c ?? 0);
 
-  // Fetch latest phase for each project
-  for (const project of projects) {
-    project.phases = await tx('nom_accelerator_phases')
-      .where({ project_id: project.id })
-      .orderBy('phase_number', 'desc')
-      .limit(1);
-  }
-
-  // Sort by latest phase creation timestamp (or project creation if no phases)
-  projects.sort((a: any, b: any) => {
-    const aTime = a.phases[0]?.created_at?.getTime() ?? a.created_at.getTime();
-    const bTime = b.phases[0]?.created_at?.getTime() ?? b.created_at.getTime();
-    return aTime - bTime;
-  });
-
-  for (const project of projects) {
-    if (project.status === AcceleratorProjectStatus.voting) {
-      const votingOpen = isVotingOpen(project.created_at, receiveBlock.createdAt);
-
-      if (!votingOpen || isQuorumReached(project, numPillars)) {
-        const passed = isQuorumReached(project, numPillars);
-        await tx('nom_accelerator_projects')
-          .where({ id: project.id })
-          .update({
-            status: passed ? AcceleratorProjectStatus.active : AcceleratorProjectStatus.closed,
-            updated_at: receiveBlock.createdAt,
-          });
-      }
-    } else if (project.status === AcceleratorProjectStatus.active) {
-      const phase = project.phases[0];
-      if (!phase || phase.status !== AcceleratorProjectStatus.voting) {
-        continue;
-      }
-
-      if (!isQuorumReached(phase, numPillars)) {
-        continue;
-      }
-
-      // Mark phase as paid
-      await tx('nom_accelerator_phases').where({ id: phase.id }).update({
-        status: AcceleratorProjectStatus.paid,
-        accepted_at: receiveBlock.createdAt,
-        updated_at: receiveBlock.createdAt,
-      });
-
-      // Update project paid and remaining amounts
-      const newZnnPaid = project.znn_paid + phase.znn_requested;
-      const newQsrPaid = project.qsr_paid + phase.qsr_requested;
-      const newZnnRemaining = project.znn_remaining - phase.znn_requested;
-      const newQsrRemaining = project.qsr_remaining - phase.qsr_requested;
-
-      const isComplete = newZnnRemaining <= 0 && newQsrRemaining <= 0;
-
+  // A project passes only while its voting period is open. Once the period
+  // ends it closes, whatever its votes.
+  for (const project of votingProjects) {
+    let status: number | null = null;
+    if (!isVotingOpen(project.created_at, now)) {
+      status = AcceleratorProjectStatus.closed;
+    } else if (isQuorumReached(project, numPillars)) {
+      status = AcceleratorProjectStatus.active;
+    }
+    if (status !== null) {
       await tx('nom_accelerator_projects')
         .where({ id: project.id })
         .update({
-          znn_paid: newZnnPaid,
-          qsr_paid: newQsrPaid,
-          znn_remaining: newZnnRemaining,
-          qsr_remaining: newQsrRemaining,
-          status: isComplete ? AcceleratorProjectStatus.completed : project.status,
+          status,
+          ...(status === AcceleratorProjectStatus.active ? { accepted_at: now } : {}),
           updated_at: receiveBlock.createdAt,
         });
     }
+  }
+
+  for (const hash of await paidPhaseHashes(tx, receiveBlock.id)) {
+    const phase = await tx('nom_accelerator_phases')
+      .where({ hash })
+      .select('id', 'project_id', 'znn_requested', 'qsr_requested')
+      .first();
+    if (!phase) {
+      throw new Error(`Accelerator.Update: phase not found for paid hash ${hash}`);
+    }
+    const project = await tx('nom_accelerator_projects')
+      .where({ id: phase.project_id })
+      .select('id', 'status', 'znn_paid', 'qsr_paid', 'znn_remaining', 'qsr_remaining')
+      .first();
+    if (!project) {
+      throw new Error(`Accelerator.Update: project not found for phase ${hash}`);
+    }
+
+    await tx('nom_accelerator_phases').where({ id: phase.id }).update({
+      status: AcceleratorProjectStatus.paid,
+      accepted_at: now,
+      updated_at: receiveBlock.createdAt,
+    });
+
+    // bigint columns arrive from Postgres as strings
+    const znnRemaining = BigInt(project.znn_remaining) - BigInt(phase.znn_requested);
+    const qsrRemaining = BigInt(project.qsr_remaining) - BigInt(phase.qsr_requested);
+    const isComplete = znnRemaining === 0n && qsrRemaining === 0n;
+
+    await tx('nom_accelerator_projects')
+      .where({ id: project.id })
+      .update({
+        znn_paid: (BigInt(project.znn_paid) + BigInt(phase.znn_requested)).toString(),
+        qsr_paid: (BigInt(project.qsr_paid) + BigInt(phase.qsr_requested)).toString(),
+        znn_remaining: znnRemaining.toString(),
+        qsr_remaining: qsrRemaining.toString(),
+        status: isComplete ? AcceleratorProjectStatus.completed : project.status,
+        updated_at: receiveBlock.createdAt,
+      });
   }
 };

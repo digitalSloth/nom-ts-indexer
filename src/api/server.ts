@@ -1,10 +1,6 @@
 import express from 'express';
 import type http from 'node:http';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { healthCheck } from './health.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function createApiServer(healthHandler: () => Promise<unknown> = healthCheck) {
   const app = express();

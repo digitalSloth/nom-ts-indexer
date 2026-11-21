@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor } from './helpers.js';
 
 const { removeNetwork } = await import('../../../../src/actions/process/bridge/remove-network.js');
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('removeNetwork', () => {
   let tx: ReturnType<typeof makeMockTx>;
@@ -10,47 +13,26 @@ describe('removeNetwork', () => {
     tx = makeMockTx();
   });
 
-  it('soft-deletes network', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({ id: 10 });        // findActiveBridgeNetwork
-    tx.resolveNext({});                // update
+  const run = () =>
+    removeNetwork(
+      makeActionContext({
+        tx,
+        decoded: { networkClass: 1, chainId: 1 },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1 },
-    });
-    await expect(removeNetwork(ctx)).resolves.toBeUndefined();
+  it('soft-deletes the network', async () => {
+    tx.resolveNext({ id: 10 });
+    tx.resolveNext({});
+
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_networks', 'update')).toEqual([{ deleted_at: CREATED_AT }]);
   });
 
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { networkClass: 1 } });
-    await expect(removeNetwork(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1 },
-    });
-    await removeNetwork(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('warns if network not found', async () => {
-    tx.resolveNext({ account_id: 1 });
-    tx.resolveNext(null);              // findActiveBridgeNetwork returns null
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { networkClass: 1, chainId: 1 },
-    });
-    await removeNetwork(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found'));
+  it('throws when the network is not found', async () => {
+    tx.resolveNext(null);
+    await expect(run()).rejects.toThrow('Bridge.RemoveNetwork: network not found for 1/1');
   });
 });

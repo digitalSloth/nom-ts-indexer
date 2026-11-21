@@ -5,6 +5,21 @@ import type {
   AccountBlock,
 } from 'znn-typescript-sdk/dist/model/nom/index.js';
 import { zenonConfig } from '../config/zenon.js';
+import { probeNode, rankNodes, type ChainAnchor } from './node-probe.js';
+
+const CONNECT_TIMEOUT_MS = 30_000;
+const PROBE_TIMEOUT_MS = 10_000;
+// The SDK sets no call timeout, so a node that stops answering would hang
+// a call forever. A timed-out call counts as a node failure.
+const RPC_CALL_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no response within ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Zenon SDK Client Service
@@ -13,9 +28,13 @@ import { zenonConfig } from '../config/zenon.js';
  * - WebSocket subscriptions for real-time momentum updates
  *
  * The SDK's `subscribe` API is only wired when the underlying client is a
- * `WsClient` (see `Zenon._setClient`). We initialize against `wsUrl` so a
- * single connection serves both ledger RPC and the subscription stream —
+ * `WsClient` (see `Zenon._setClient`). We initialize against a WebSocket URL
+ * so a single connection serves both ledger RPC and the subscription stream —
  * `rpc-websockets` multiplexes concurrent calls under the hood.
+ *
+ * `ZNN_WS_URL` lists one or more nodes in priority order. The client
+ * connects to the first healthy node, and `failover()` / `failback()` move
+ * the connection between them (see `node-probe.ts` for the health rules).
  */
 class ZenonClient {
   private zenon: Zenon;
@@ -23,6 +42,8 @@ class ZenonClient {
   private wsCallbacks: Map<string, (momentum: Momentum) => void> = new Map();
   private subscriptionInitialized = false;
   private subscriptionInitPromise?: Promise<void>;
+  private readonly nodeUrls: string[] = zenonConfig.wsUrls;
+  private activeIndex = -1;
 
   constructor() {
     this.zenon = Zenon.getInstance();
@@ -32,27 +53,119 @@ class ZenonClient {
   }
 
   /**
-   * Initialize the connection. Uses the WebSocket URL so that both ledger RPC
-   * and subscription notifications flow through the same client.
+   * Connect to the first healthy node. `anchor` is the last indexed
+   * momentum, which a healthy node must have on its chain.
    */
-  async initialize(): Promise<void> {
+  async initialize(anchor: ChainAnchor | null = null): Promise<void> {
     if (this.isInitialized) {
       console.log('Zenon client already initialized');
       return;
     }
 
     console.log(`Initializing Zenon client...`);
-    console.log(`WS URL: ${zenonConfig.wsUrl}`);
+    console.log(`WS URLs: ${this.nodeUrls.join(', ')}`);
     console.log(`Chain ID: ${zenonConfig.chainId}`);
 
-    try {
-      await this.zenon.initialize(zenonConfig.wsUrl, 30000);
-      this.isInitialized = true;
-      console.log('✓ Zenon client initialized successfully');
-    } catch (error) {
-      console.error('Failed to initialize Zenon client:', error);
-      throw new Error(`Zenon client initialization failed: ${error}`);
+    if (!(await this.connectToBestNode(anchor))) {
+      throw new Error('Zenon client initialization failed: no healthy node');
     }
+    console.log('✓ Zenon client initialized successfully');
+  }
+
+  /**
+   * Reconnect to the highest-priority healthy node, which may be the
+   * current one. Returns false when no node is healthy.
+   */
+  async failover(anchor: ChainAnchor | null): Promise<boolean> {
+    console.warn(`Failing over from ${this.activeUrl()}`);
+    return this.connectToBestNode(anchor);
+  }
+
+  /**
+   * While on a backup, switch to a higher-priority node once it is healthy.
+   * Stays on the current node otherwise.
+   */
+  async failback(anchor: ChainAnchor | null): Promise<void> {
+    if (!this.isOnBackup()) return;
+
+    const { usable } = await this.checkNodes(anchor);
+    const preferred = usable.find((i) => i < this.activeIndex);
+    if (preferred === undefined) return;
+
+    const from = this.activeUrl();
+    if (await this.connectTo(preferred)) {
+      console.log(`✓ Failed back from ${from} to ${this.activeUrl()}`);
+    } else if (!(await this.connectToBestNode(anchor))) {
+      // The old connection is closed, so stay connected to something
+      console.error('No healthy node after a failed failback');
+    }
+  }
+
+  /** True when connected to a node other than the primary. */
+  isOnBackup(): boolean {
+    return this.activeIndex > 0;
+  }
+
+  /** The URL of the connected node, or null before the first connection. */
+  activeUrl(): string | null {
+    return this.nodeUrls[this.activeIndex] ?? null;
+  }
+
+  private async checkNodes(anchor: ChainAnchor | null) {
+    const results = await Promise.all(
+      this.nodeUrls.map((url) =>
+        probeNode(url, anchor?.height ?? null, PROBE_TIMEOUT_MS).catch((error: Error) => error),
+      ),
+    );
+    return rankNodes(results, anchor, zenonConfig.chainId);
+  }
+
+  private async connectToBestNode(anchor: ChainAnchor | null): Promise<boolean> {
+    const { usable, reasons } = await this.checkNodes(anchor);
+    reasons.forEach((reason, i) => {
+      if (reason) console.warn(`Skipping node ${this.nodeUrls[i]}: ${reason}`);
+    });
+
+    for (const index of usable) {
+      if (await this.connectTo(index)) return true;
+    }
+    console.error('No healthy Zenon node');
+    return false;
+  }
+
+  /**
+   * Replace the current connection with one to `nodeUrls[index]`, and
+   * restore the momentum subscription if one was open.
+   */
+  private async connectTo(index: number): Promise<boolean> {
+    const url = this.nodeUrls[index];
+    this.zenon.clearConnection();
+    this.subscriptionInitialized = false;
+
+    try {
+      console.log(`Connecting to ${url}`);
+      await this.zenon.initialize(url, CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      // Stop the SDK's reconnect loop to the failed node
+      this.zenon.clearConnection();
+      this.isInitialized = false;
+      console.error(`Failed to connect to ${url}:`, error);
+      return false;
+    }
+
+    this.activeIndex = index;
+    this.isInitialized = true;
+    console.log(`✓ Connected to ${url}`);
+
+    if (this.wsCallbacks.size > 0) {
+      try {
+        await this.ensureMomentumStream();
+      } catch (error) {
+        // The indexer's frontier poll still finds new momentums
+        console.error(`Failed to resubscribe to momentums on ${url}:`, error);
+      }
+    }
+    return true;
   }
 
   /**
@@ -71,7 +184,7 @@ class ZenonClient {
     this.ensureInitialized();
 
     try {
-      return await this.zenon.ledger.getFrontierMomentum();
+      return await withTimeout(this.zenon.ledger.getFrontierMomentum(), RPC_CALL_TIMEOUT_MS);
     } catch (error) {
       console.error('Error fetching frontier momentum:', error);
       throw new Error(`Failed to fetch frontier momentum: ${error}`);
@@ -87,7 +200,10 @@ class ZenonClient {
     this.ensureInitialized();
 
     try {
-      return await this.zenon.ledger.getMomentumsByHeight(height, count);
+      return await withTimeout(
+        this.zenon.ledger.getMomentumsByHeight(height, count),
+        RPC_CALL_TIMEOUT_MS,
+      );
     } catch (error) {
       console.error(`Error fetching momentums at height ${height}:`, error);
       throw new Error(`Failed to fetch momentums at height ${height}: ${error}`);
@@ -101,7 +217,7 @@ class ZenonClient {
     this.ensureInitialized();
 
     try {
-      return await this.zenon.ledger.getMomentumByHash(hash);
+      return await withTimeout(this.zenon.ledger.getMomentumByHash(hash), RPC_CALL_TIMEOUT_MS);
     } catch (error) {
       console.error(`Error fetching momentum by hash ${hash}:`, error);
       throw new Error(`Failed to fetch momentum by hash: ${error}`);
@@ -115,7 +231,7 @@ class ZenonClient {
     this.ensureInitialized();
 
     try {
-      return await this.zenon.ledger.getAccountBlockByHash(hash);
+      return await withTimeout(this.zenon.ledger.getAccountBlockByHash(hash), RPC_CALL_TIMEOUT_MS);
     } catch (error) {
       console.error(`Error fetching account block by hash ${hash}:`, error);
       throw new Error(`Failed to fetch account block by hash: ${error}`);
@@ -153,8 +269,8 @@ class ZenonClient {
     if (this.subscriptionInitPromise) return this.subscriptionInitPromise;
 
     this.subscriptionInitPromise = (async () => {
-      console.log(`Subscribing to momentums via WebSocket: ${zenonConfig.wsUrl}`);
-      const stream = await this.zenon.subscribe.toMomentums();
+      console.log(`Subscribing to momentums via WebSocket: ${this.activeUrl()}`);
+      const stream = await withTimeout(this.zenon.subscribe.toMomentums(), RPC_CALL_TIMEOUT_MS);
       stream.onNotification((data: any[]) => {
         void this.fanOutMomentumNotifications(data);
       });
@@ -212,6 +328,7 @@ class ZenonClient {
       this.subscriptionInitialized = false;
       this.zenon.clearConnection();
       this.isInitialized = false;
+      this.activeIndex = -1;
       console.log('✓ Zenon client disconnected');
     } catch (error) {
       console.error('Error disconnecting Zenon client:', error);

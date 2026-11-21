@@ -2,8 +2,7 @@ import { promises as fs } from 'fs';
 import { db } from '../../knex.js';
 import { genesisPath } from '../../../config/genesis.js';
 import { accountRegistry } from '../../../services/registries/account-registry.js';
-
-const GENESIS_TIMESTAMP = new Date('2021-11-24T12:00:00Z');
+import { genesisTimestamp } from '../genesis/genesis-file.js';
 
 interface GenesisToken {
   owner: string;
@@ -20,6 +19,7 @@ interface GenesisToken {
 }
 
 interface GenesisData {
+  GenesisTimestampSec: number;
   TokenConfig: {
     Tokens: GenesisToken[];
   };
@@ -42,6 +42,7 @@ export async function seedNetworkTokens(): Promise<void> {
   }
 
   const tokens = genesisData.TokenConfig.Tokens;
+  const createdAt = genesisTimestamp(genesisData);
 
   for (const tokenData of tokens) {
     const ownerId = await accountRegistry.getOrCreate(db, tokenData.owner);
@@ -60,7 +61,7 @@ export async function seedNetworkTokens(): Promise<void> {
         is_burnable: tokenData.isBurnable,
         is_mintable: tokenData.isMintable,
         is_utility: tokenData.isUtility,
-        created_at: GENESIS_TIMESTAMP,
+        created_at: createdAt,
       })
       .onConflict('token_standard')
       .merge();

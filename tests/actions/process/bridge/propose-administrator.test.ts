@@ -1,83 +1,90 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor, buildersFor } from './helpers.js';
 
-const { proposeAdministrator } = await import('../../../../src/actions/process/bridge/propose-administrator.js');
+const getOrCreate = vi.fn();
+vi.mock('../../../../src/services/registries/account-registry.js', () => ({
+  accountRegistry: { getOrCreate: (...args: any[]) => getOrCreate(...args) },
+}));
+
+const { makeProposeAdministrator } =
+  await import('../../../../src/actions/process/bridge/propose-administrator.js');
+const { BRIDGE_GOVERNANCE, LIQUIDITY_GOVERNANCE } =
+  await import('../../../../src/actions/process/bridge/governance.js');
+const proposeAdministrator = makeProposeAdministrator(BRIDGE_GOVERNANCE);
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('proposeAdministrator', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   beforeEach(() => {
     tx = makeMockTx();
+    getOrCreate.mockReset();
+    getOrCreate.mockResolvedValue(20);
   });
 
-  it('creates nomination', async () => {
-    tx.resolveNext({ id: 1 });          // guardian lookup
-    tx.resolveNext({ id: 50 });         // proposed account lookup
-    tx.resolveNext({});                  // insert nomination
-    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }]); // active guardians (array)
-    tx.resolveNext([]);                  // groupBy nominations (no majority)
+  const run = () =>
+    proposeAdministrator(
+      makeActionContext({
+        tx,
+        decoded: { address: 'z1proposed' },
+        sendBlock: { accountId: 5 },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qproposed' },
-    });
-    await expect(proposeAdministrator(ctx)).resolves.toBeUndefined();
+  it("replaces the guardian's previous vote and records no winner below the threshold", async () => {
+    tx.resolveNext({}); // delete previous vote
+    tx.resolveNext({}); // insert vote
+    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]); // 4 guardians, threshold 2
+    tx.resolveNext([{ account_id: 20, count: '2' }]);
+
+    await run();
+
+    const [previousVote] = buildersFor(tx, 'nom_bridge_admins');
+    expect(previousVote.where).toHaveBeenCalledWith({ nominated_by_id: 5 });
+    expect(previousVote.del).toHaveBeenCalled();
+    expect(argsFor(tx, 'nom_bridge_admins', 'insert')).toEqual([
+      { account_id: 20, nominated_by_id: 5, nominated_at: CREATED_AT },
+    ]);
   });
 
-  it('executes majority vote and promotes winner', async () => {
-    tx.resolveNext({ id: 1 });          // guardian lookup
-    tx.resolveNext({ id: 50 });         // proposed account lookup
-    tx.resolveNext({});                  // insert nomination
-    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }]); // active guardians
-    tx.resolveNext([{ account_id: 50, count: 2 }]); // nominations with majority
-    tx.resolveNext({});                  // del pending
-    tx.resolveNext({});                  // revoke current admin
-    tx.resolveNext({});                  // insert new admin
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qproposed' },
-    });
-    await expect(proposeAdministrator(ctx)).resolves.toBeUndefined();
-  });
-
-  it('throws on missing address', async () => {
-    const ctx = makeActionContext({ tx, decoded: {} });
-    await expect(proposeAdministrator(ctx)).rejects.toThrow('missing required field');
-  });
-
-  it('warns if sender is not guardian', async () => {
-    tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { address: 'z1qproposed' } });
-    await proposeAdministrator(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not an active guardian'));
-  });
-
-  it('warns if proposed account not found', async () => {
-    tx.resolveNext({ id: 1 });
-    tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { address: 'z1qproposed' } });
-    await proposeAdministrator(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('account not found'));
-  });
-
-  it('does not promote without majority', async () => {
-    tx.resolveNext({ id: 1 });
-    tx.resolveNext({ id: 50 });
+  it('elects the administrator once more than half of the guardians vote for it', async () => {
     tx.resolveNext({});
-    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }]);
-    tx.resolveNext([{ account_id: 50, count: 1 }]); // only 1 vote, need > 1
+    tx.resolveNext({});
+    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+    tx.resolveNext([{ account_id: 20, count: '3' }]);
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qproposed' },
-    });
-    await expect(proposeAdministrator(ctx)).resolves.toBeUndefined();
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_admins', 'update')).toEqual([{ revoked_at: CREATED_AT }]);
+    expect(argsFor(tx, 'nom_bridge_admins', 'insert')).toEqual([
+      { account_id: 20, nominated_by_id: 5, nominated_at: CREATED_AT },
+      { account_id: 20, accepted_at: CREATED_AT },
+    ]);
+  });
+
+  it('counts liquidity guardian votes in the liquidity tables', async () => {
+    tx.resolveNext({});
+    tx.resolveNext({});
+    tx.resolveNext([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]); // threshold 2
+    tx.resolveNext([{ account_id: 20, count: '3' }]);
+
+    await makeProposeAdministrator(LIQUIDITY_GOVERNANCE)(
+      makeActionContext({
+        tx,
+        decoded: { address: 'z1proposed' },
+        sendBlock: { accountId: 5 },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
+
+    expect(argsFor(tx, 'nom_liquidity_admins', 'insert')).toEqual([
+      { account_id: 20, nominated_by_id: 5, nominated_at: CREATED_AT },
+      { account_id: 20, accepted_at: CREATED_AT },
+    ]);
+    expect(buildersFor(tx, 'nom_liquidity_guardians')).toHaveLength(1);
+    expect(buildersFor(tx, 'nom_bridge_admins')).toEqual([]);
   });
 });

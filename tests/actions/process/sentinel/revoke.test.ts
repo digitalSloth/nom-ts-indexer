@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 
 const { revoke } = await import('../../../../src/actions/process/sentinel/revoke.js');
 
-describe('revoke', () => {
+describe('sentinel revoke', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   beforeEach(() => {
@@ -11,20 +11,23 @@ describe('revoke', () => {
   });
 
   it('revokes the active sentinel', async () => {
-    tx.resolveNext({ id: 42 }); // active sentinel found
-    tx.resolveNext({});          // update
-
-    const ctx = makeActionContext({ tx });
-    await expect(revoke(ctx)).resolves.toBeUndefined();
-  });
-
-  it('warns if no active sentinel found', async () => {
-    tx.resolveNext(null); // no active sentinel
-    const warnSpy = vi.spyOn(console, 'warn');
+    tx.resolveNext({ id: 42 }); // active sentinel lookup
+    tx.resolveNext({}); // update
 
     const ctx = makeActionContext({ tx });
     await revoke(ctx);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('no active sentinel'));
+    const update = tx.mock.results[1].value;
+    expect(update.where).toHaveBeenCalledWith({ id: 42 });
+    expect(update.update).toHaveBeenCalledWith({ revoked_at: new Date('2024-01-01T00:00:00Z') });
+  });
+
+  it('throws when the sender has no active sentinel', async () => {
+    tx.resolveNext(null); // active sentinel lookup
+
+    const ctx = makeActionContext({ tx });
+    await expect(revoke(ctx)).rejects.toThrow(
+      'Sentinel.Revoke: active sentinel not found for account 1',
+    );
   });
 });

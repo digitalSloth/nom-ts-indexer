@@ -1,4 +1,5 @@
 import type { ActionContext, ActionHandler } from '../types.js';
+import { updateAccountTokenBalance } from '../../indexer/update-account-token-balance.js';
 
 /**
  * Burn is unique: the ABI declares no decoded args. The amount and tokenId come
@@ -7,25 +8,14 @@ import type { ActionContext, ActionHandler } from '../types.js';
 export const burn: ActionHandler = async (ctx: ActionContext): Promise<void> => {
   const { tx, sendBlock, receiveBlock } = ctx;
 
-  if (sendBlock.tokenId == null) {
-    console.warn('Token.Burn: send block has no token, skipping');
-    return;
-  }
-
   const amount = BigInt(sendBlock.amount);
-  if (amount <= 0n) {
-    console.warn('Token.Burn: amount is zero, skipping');
-    return;
-  }
 
   const token = await tx('nom_tokens')
     .where({ id: sendBlock.tokenId })
     .select('id', 'total_supply', 'max_supply', 'is_mintable')
     .first();
-
   if (!token) {
-    console.warn('Token.Burn: token not found, skipping');
-    return;
+    throw new Error(`Token.Burn: token not found for id ${sendBlock.tokenId}`);
   }
 
   await tx('nom_token_burns').insert({
@@ -46,4 +36,13 @@ export const burn: ActionHandler = async (ctx: ActionContext): Promise<void> => 
   }
 
   await tx('nom_tokens').where({ id: token.id }).update(data);
+
+  // The contract received the burned tokens and destroys them.
+  await updateAccountTokenBalance(
+    tx,
+    sendBlock.toAccountId,
+    token.id,
+    -amount,
+    receiveBlock.createdAt,
+  );
 };

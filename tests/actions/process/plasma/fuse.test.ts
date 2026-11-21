@@ -20,46 +20,21 @@ describe('fuse', () => {
     getOrCreate.mockResolvedValue(50);
   });
 
-  it('creates plasma record', async () => {
-    tx.resolveNext(null); // no existing plasma
-    tx.resolveNext({});   // insert
+  it('creates a plasma record for the beneficiary', async () => {
+    tx.resolveNext({}); // insert
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qbeneficiary' },
-      sendBlock: { id: 10, accountId: 1, amount: '1000000000' } as any,
-    });
-    await expect(fuse(ctx)).resolves.toBeUndefined();
-
-    expect(getOrCreate).toHaveBeenCalledWith(tx, 'z1qbeneficiary');
-  });
-
-  it('skips if plasma already exists (idempotent)', async () => {
-    tx.resolveNext({ id: 99 }); // existing plasma found
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qbeneficiary' },
-      sendBlock: { id: 10, amount: '1000' } as any,
-    });
-    await expect(fuse(ctx)).resolves.toBeUndefined();
-  });
-
-  it('throws on missing address', async () => {
-    const ctx = makeActionContext({ tx, decoded: {} });
-    await expect(fuse(ctx)).rejects.toThrow('missing address');
-  });
-
-  it('warns if amount is zero', async () => {
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { address: 'z1qbeneficiary' },
-      sendBlock: { amount: '0' } as any,
-    });
+    const ctx = makeActionContext({ tx, decoded: { address: 'z1qbeneficiary' } });
     await fuse(ctx);
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('amount is zero'));
+    expect(getOrCreate).toHaveBeenCalledWith(tx, 'z1qbeneficiary');
+    expect(tx.mock.results[0].value.insert).toHaveBeenCalledWith({
+      from_account_id: 1,
+      to_account_id: 50,
+      account_block_id: 10,
+      hash: 'sendblockhash123',
+      amount: '100000000',
+      started_at: new Date('2024-01-01T00:00:00Z'),
+      expiration_height: '4600',
+    });
   });
 });

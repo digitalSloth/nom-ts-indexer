@@ -1,25 +1,23 @@
 import type { ActionContext, ActionHandler } from '../types.js';
-import { assertRequiredFields } from '../../../helpers/assert-required.js';
 import { resolveVotable, upsertVote, recountVotes } from './vote-helpers.js';
 
 export const voteByProdAddress: ActionHandler = async (ctx: ActionContext): Promise<void> => {
   const { tx, decoded, sendBlock, receiveBlock } = ctx;
 
-  assertRequiredFields(decoded, ['id', 'vote'], 'Accelerator.VoteByProdAddress');
-
   const pillar = await tx('nom_pillars')
     .where({ producer_account_id: sendBlock.accountId })
+    .whereNull('revoked_at')
     .select('id', 'owner_id')
     .first();
   if (!pillar) {
-    console.warn('Accelerator.VoteByProdAddress: pillar not found for producer address');
-    return;
+    throw new Error(
+      `Accelerator.VoteByProdAddress: active pillar not found for producer account ${sendBlock.accountId}`,
+    );
   }
 
   const resolved = await resolveVotable(tx, decoded.id as string);
   if (!resolved) {
-    console.warn(`Accelerator.VoteByProdAddress: votable item not found for hash ${decoded.id}`);
-    return;
+    throw new Error(`Accelerator.VoteByProdAddress: votable item not found for hash ${decoded.id}`);
   }
 
   await upsertVote(tx, {

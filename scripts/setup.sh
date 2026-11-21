@@ -1,68 +1,50 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Sets up a local indexer: Postgres and Redis run in Docker, the indexer
+# runs on the host. Safe to re-run: the seeders skip a seeded database.
+set -euo pipefail
 
-# Zenon Network Indexer - Quick Setup Script
+cd "$(dirname "$0")/.."
 
-set -e
+fail() {
+  echo "✗ $1" >&2
+  exit 1
+}
 
-echo "🌟 Zenon Network Indexer - Setup"
-echo ""
+command -v docker >/dev/null 2>&1 || fail "Docker is not installed: https://docs.docker.com/get-docker/"
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 ('docker compose') is not available"
+command -v npm >/dev/null 2>&1 || fail "Node.js and npm are not installed"
 
-# Check if Docker is installed
-if ! command -v docker &> /dev/null; then
-    echo "❌ Docker is not installed. Please install Docker first:"
-    echo "   https://docs.docker.com/get-docker/"
-    exit 1
-fi
-
-# Check if Docker Compose is installed
-if ! command -v docker-compose &> /dev/null; then
-    echo "❌ Docker Compose is not installed. Please install it first:"
-    echo "   https://docs.docker.com/compose/install/"
-    exit 1
-fi
-
-echo "✓ Docker is installed"
-echo "✓ Docker Compose is installed"
-echo ""
-
-# Create .env if it doesn't exist
-if [ ! -f .env ]; then
-    echo "Creating .env file..."
-    cp .env.docker .env
-    echo "✓ .env file created (edit it to customize your setup)"
+if [ -f .env ]; then
+  echo "✓ Using existing .env"
 else
-    echo "✓ .env file already exists"
+  cp .env.example .env
+  echo "✓ Created .env from .env.example (local devnet defaults)"
 fi
 
-echo ""
-echo "🐳 Starting Docker services..."
-echo ""
+echo "→ Starting Postgres and Redis"
+docker compose up -d --wait postgres redis
 
-# Start services
-docker-compose up -d
+echo "→ Installing dependencies"
+npm ci
 
-echo ""
-echo "⏳ Waiting for services to be healthy..."
-sleep 5
+echo "→ Building"
+npm run build
 
-# Check service health
-if docker-compose ps | grep -q "Up"; then
-    echo ""
-    echo "✅ Setup complete!"
-    echo ""
-    echo "Services running:"
-    docker-compose ps
-    echo ""
-    echo "📊 View indexer logs:"
-    echo "   docker-compose logs -f indexer"
-    echo ""
-    echo "🗄️  Access PostgreSQL:"
-    echo "   docker-compose exec postgres psql -U zenon -d nom_indexer"
-    echo ""
-    echo "🛑 Stop all services:"
-    echo "   docker-compose down"
-    echo ""
-else
-    echo "❌ Something went wrong. Check logs:"
-    echo "   docker-compose logs"
-fi
+echo "→ Running migrations"
+npm run db:migrate
+
+echo "→ Running seeders"
+npm run db:seed
+
+cat <<EOF
+
+✓ Setup complete. Start the indexer:
+    npm start          # compiled build
+    npm run dev        # hot reload
+
+  Check progress:
+    docker compose exec postgres psql -U zenon -d nom_indexer -c "select * from indexer.indexer_state"
+
+  Stop Postgres and Redis:
+    docker compose down
+EOF

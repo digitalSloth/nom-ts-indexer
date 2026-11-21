@@ -1,35 +1,36 @@
 import { db } from '../../knex.js';
-import { BRIDGE_ADMIN_ADDRESS } from '../../../constants/zenon.js';
+import { accountRegistry } from '../../../services/registries/account-registry.js';
+import { INITIAL_ADMINISTRATOR_ADDRESS } from '../../../constants/zenon.js';
+import { genesisTimestamp, readGenesis } from '../genesis/genesis-file.js';
+
+/** Momentums the bridge stays halted after Unhalt (go-zenon `MinUnhaltDurationInMomentums`). */
+const UNHALT_DURATION_IN_MOMENTUMS = 6 * 360;
 
 /**
- * Seed initial bridge admin
+ * Seed the bridge contract's starting state: its administrator and the
+ * settings row with the contract's defaults.
  */
 export async function seedBridge(): Promise<void> {
   console.log('Seeding bridge data...');
 
-  // Find bridge admin account
-  const bridgeAdmin = await db('nom_accounts')
-    .where({ address: BRIDGE_ADMIN_ADDRESS })
-    .select('id')
-    .first();
+  const startedAt = genesisTimestamp(await readGenesis<{ GenesisTimestampSec: number }>());
+  const adminId = await accountRegistry.getOrCreate(db, INITIAL_ADMINISTRATOR_ADDRESS);
 
-  if (!bridgeAdmin) {
-    throw new Error(
-      'Bridge admin account not found. Make sure to run network accounts seeder first.',
-    );
-  }
-
-  // Check if bridge admin already exists
-  const existing = await db('nom_bridge_admins').where({ account_id: bridgeAdmin.id }).first();
-
+  const existing = await db('nom_bridge_admins').first();
   if (!existing) {
     await db('nom_bridge_admins').insert({
-      account_id: bridgeAdmin.id,
-      nominated_at: new Date('2023-05-03 10:17:30'),
-      accepted_at: new Date('2023-05-03 10:17:30'),
+      account_id: adminId,
+      nominated_at: startedAt,
+      accepted_at: startedAt,
     });
   }
-
   console.log('  ✓ Bridge admin record created');
+
+  await db('nom_bridge_settings')
+    .insert({ id: 1, unhalt_duration: UNHALT_DURATION_IN_MOMENTUMS, updated_at: startedAt })
+    .onConflict('id')
+    .ignore();
+  console.log('  ✓ Bridge settings created');
+
   console.log('✓ Bridge data seeded successfully\n');
 }

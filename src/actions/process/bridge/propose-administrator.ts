@@ -1,67 +1,49 @@
-import type { ActionContext, ActionHandler } from '../types.js';
+import type { ActionHandler } from '../types.js';
+import { accountRegistry } from '../../../services/registries/account-registry.js';
+import { revokeAdministrator, type GovernedContract } from './governance.js';
 
-export const proposeAdministrator: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, decoded, sendBlock, receiveBlock } = ctx;
+/**
+ * ProposeAdministrator: a guardian's vote for a new administrator while an
+ * emergency has left the contract without one.
+ */
+export function makeProposeAdministrator(contract: GovernedContract): ActionHandler {
+  return async (ctx) => {
+    const { tx, decoded, sendBlock, receiveBlock } = ctx;
 
-  if (!decoded.address) {
-    throw new Error('Bridge.ProposeAdministrator: missing required field "address"');
-  }
+    const proposedAccountId = await accountRegistry.getOrCreate(tx, decoded.address as string);
 
-  // Check sender is an active guardian
-  const guardian = await tx('nom_bridge_guardians')
-    .where({
-      account_id: sendBlock.accountId,
-    })
-    .whereNull('revoked_at')
-    .select('id')
-    .first();
-  if (!guardian) {
-    console.warn('Bridge.ProposeAdministrator: sender is not an active guardian');
-    return;
-  }
+    // Each guardian holds one vote, so a new proposal replaces their last one.
+    await tx(contract.adminsTable)
+      .where({ nominated_by_id: sendBlock.accountId })
+      .whereNull('accepted_at')
+      .del();
+    await tx(contract.adminsTable).insert({
+      account_id: proposedAccountId,
+      nominated_by_id: sendBlock.accountId,
+      nominated_at: receiveBlock.createdAt,
+    });
 
-  const proposedAccount = await tx('nom_accounts')
-    .where({ address: decoded.address as string })
-    .select('id')
-    .first();
-  if (!proposedAccount) {
-    console.warn('Bridge.ProposeAdministrator: proposed account not found');
-    return;
-  }
+    // An address wins with more than half of the guardians' votes.
+    const activeGuardians = await tx(contract.guardiansTable).whereNull('revoked_at').select('id');
+    const threshold = Math.floor(activeGuardians.length / 2);
 
-  // Create nomination record
-  await tx('nom_bridge_admins').insert({
-    account_id: proposedAccount.id,
-    nominated_by_id: sendBlock.accountId,
-    nominated_at: receiveBlock.createdAt,
-  });
+    const nominations = await tx(contract.adminsTable)
+      .whereNull('accepted_at')
+      .groupBy('account_id')
+      .select('account_id')
+      .count('* as count');
 
-  // Check if majority of guardians voted for the same address
-  const activeGuardians = await tx('nom_bridge_guardians').whereNull('revoked_at').select('id');
-  const numGuardians = activeGuardians.length;
-  const votesNeeded = Math.floor(numGuardians / 2);
+    const winner = nominations.find((n: any) => Number(n.count) > threshold);
+    if (!winner) {
+      return;
+    }
 
-  const nominations = await tx('nom_bridge_admins')
-    .whereNull('accepted_at')
-    .groupBy('account_id')
-    .select('account_id')
-    .count('* as count');
-
-  const winner = nominations.find((n: any) => Number(n.count) > votesNeeded);
-  if (winner) {
-    // Delete pending nominations
-    await tx('nom_bridge_admins').whereNull('accepted_at').del();
-
-    // Revoke current admin
-    await tx('nom_bridge_admins')
-      .whereNotNull('accepted_at')
-      .whereNull('revoked_at')
-      .update({ revoked_at: receiveBlock.createdAt });
-
-    // Create new admin
-    await tx('nom_bridge_admins').insert({
+    // The contract clears every vote once an administrator is elected.
+    await tx(contract.adminsTable).whereNull('accepted_at').del();
+    await revokeAdministrator(tx, contract, receiveBlock.createdAt);
+    await tx(contract.adminsTable).insert({
       account_id: winner.account_id,
       accepted_at: receiveBlock.createdAt,
     });
-  }
-};
+  };
+}

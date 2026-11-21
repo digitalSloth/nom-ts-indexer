@@ -1,6 +1,6 @@
-import {beforeEach, describe, expect, it, vi} from 'vitest';
-import {makeMockTx} from '../../helpers/mock-action-context.js';
-import type {LinkedBlock} from '../../../src/actions/indexer/insert-account-block.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { makeMockTx } from '../../helpers/mock-action-context.js';
+import type { LinkedBlock } from '../../../src/actions/indexer/insert-account-block.js';
 
 // Mock the contract registry
 const getMethod = vi.fn();
@@ -19,6 +19,8 @@ vi.mock('../../../src/actions/process/registry.js', () => ({
   keyFor: (c: string, m: string) => `${c}.${m}`,
   registerHandler: vi.fn(),
 }));
+
+const FRONTIER = { height: 99n, timestamp: new Date('2024-01-02') };
 
 let dispatchAction: typeof import('../../../src/actions/process/dispatcher.js').dispatchAction;
 
@@ -72,30 +74,39 @@ describe('dispatchAction', () => {
   it('returns early when contractMethodId is null', async () => {
     getMethod.mockReturnValue(null);
     const send = makeLinkedBlock({ contractMethodId: null });
-    await dispatchAction(tx, makeReceiveBlock(), send);
+    await dispatchAction(tx, makeReceiveBlock(), send, FRONTIER);
     expect(getHandlerFn).not.toHaveBeenCalled();
   });
 
   it('returns early when method not found in registry', async () => {
     getMethod.mockReturnValue(null);
-    await dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock());
+    await dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock(), FRONTIER);
     expect(getHandlerFn).not.toHaveBeenCalled();
   });
 
   it('returns early when handler not registered', async () => {
     getMethod.mockReturnValue({ contractName: 'Pillar Contract', methodName: 'Register' });
     getHandlerFn.mockReturnValue(undefined);
-    await dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock());
+    await dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock(), FRONTIER);
     expect(warnMissingOnceFn).toHaveBeenCalledWith('Pillar Contract', 'Register');
   });
 
-  it('returns early when decoded JSON is invalid', async () => {
+  it('throws when the send block has no decoded data', async () => {
+    getMethod.mockReturnValue({ contractName: 'C', methodName: 'M' });
+    getHandlerFn.mockReturnValue(vi.fn());
+    tx.resolveNext(null); // DB query for decoded data
+    await expect(
+      dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock(), FRONTIER),
+    ).rejects.toThrow(/C\.M: send block sendblockhash has no decoded data/);
+  });
+
+  it('throws when decoded JSON is invalid', async () => {
     getMethod.mockReturnValue({ contractName: 'C', methodName: 'M' });
     getHandlerFn.mockReturnValue(vi.fn());
     tx.resolveNext({ decoded: 'not-json' }); // DB query for decoded data
-    const consoleSpy = vi.spyOn(console, 'error');
-    await dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock());
-    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Failed to parse'));
+    await expect(
+      dispatchAction(tx, makeReceiveBlock(), makeLinkedBlock(), FRONTIER),
+    ).rejects.toThrow();
   });
 
   it('calls handler with correct ActionContext', async () => {
@@ -107,7 +118,7 @@ describe('dispatchAction', () => {
     const receive = makeReceiveBlock();
 
     tx.resolveNext({ decoded: '{"name":"MyPillar","amount":"100"}' }); // DB query for decoded data
-    await dispatchAction(tx, receive, send);
+    await dispatchAction(tx, receive, send, FRONTIER);
 
     expect(handler).toHaveBeenCalledWith({
       tx,
@@ -116,6 +127,7 @@ describe('dispatchAction', () => {
         momentumId: 100,
         createdAt: new Date('2024-01-02'),
       },
+      frontierMomentum: FRONTIER,
       sendBlock: {
         id: 10,
         accountId: 1,

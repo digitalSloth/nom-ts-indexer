@@ -44,6 +44,9 @@ class TokenRegistry {
 
     const ownerId = await accountRegistry.getOrCreate(txOrDb, data.owner.toString());
 
+    // The node reports neither the initial supply nor the issue time, so
+    // both stay null until the token's IssueToken is indexed.
+
     const token = await txOrDb('nom_tokens')
       .insert({
         owner_id: ownerId,
@@ -52,6 +55,7 @@ class TokenRegistry {
         domain: data.domain,
         token_standard: data.tokenStandard.toString(),
         total_supply: data.totalSupply.toString(),
+        initial_supply: null,
         max_supply: data.maxSupply.toString(),
         decimals: data.decimals,
         is_burnable: data.isBurnable,

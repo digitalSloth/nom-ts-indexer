@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 
 const { revoke } = await import('../../../../src/actions/process/pillar/revoke.js');
@@ -11,42 +11,23 @@ describe('revoke', () => {
   });
 
   it('revokes the pillar', async () => {
-    tx.resolveNext({ id: 42, owner_id: 1, revoked_at: null }); // pillar lookup
+    tx.resolveNext({ id: 42 }); // pillar lookup
     tx.resolveNext({}); // update
 
     const ctx = makeActionContext({ tx, decoded: { name: 'MyPillar' } });
-    await expect(revoke(ctx)).resolves.toBeUndefined();
+    await revoke(ctx);
+
+    const update = tx.mock.results[1].value;
+    expect(update.where).toHaveBeenCalledWith({ id: 42 });
+    expect(update.update).toHaveBeenCalledWith(
+      expect.objectContaining({ revoked_at: new Date('2024-01-01T00:00:00Z'), weight: '0' }),
+    );
   });
 
-  it('throws on empty name', async () => {
-    const ctx = makeActionContext({ tx, decoded: { name: '' } });
-    await expect(revoke(ctx)).rejects.toThrow('name is empty');
-  });
-
-  it('warns if pillar not found', async () => {
-    tx.resolveNext(null); // pillar not found
-    const warnSpy = vi.spyOn(console, 'warn');
+  it('throws when the pillar is not found', async () => {
+    tx.resolveNext(null); // pillar lookup
 
     const ctx = makeActionContext({ tx, decoded: { name: 'Unknown' } });
-    await revoke(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found'));
-  });
-
-  it('warns if sender is not owner', async () => {
-    tx.resolveNext({ id: 42, owner_id: 999, revoked_at: null }); // wrong owner
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { name: 'MyPillar' } });
-    await revoke(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not pillar owner'));
-  });
-
-  it('skips if already revoked (idempotent)', async () => {
-    tx.resolveNext({ id: 42, owner_id: 1, revoked_at: new Date() }); // already revoked
-
-    const ctx = makeActionContext({ tx, decoded: { name: 'MyPillar' } });
-    await expect(revoke(ctx)).resolves.toBeUndefined();
+    await expect(revoke(ctx)).rejects.toThrow('Pillar.Revoke: pillar not found for Unknown');
   });
 });

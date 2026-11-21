@@ -1,10 +1,16 @@
-import { connectDatabase, disconnectDatabase } from '../index.js';
+import { connectDatabase, db, disconnectDatabase } from '../index.js';
+import { markSeeded, seedState } from './seed-state.js';
 import { seedNetworkAccounts } from './network/accounts-seeder.js';
 import { seedNetworkTokens } from './network/tokens-seeder.js';
 import { seedBridge } from './network/bridge-seeder.js';
-import { seedContractMethods } from './network/contract-method-seeder.js';
+import { seedLiquidity } from './network/liquidity-seeder.js';
+import { syncContractMethods } from '../contract-methods.js';
 import { seedGenesisAccounts } from './genesis/accounts-seeder.js';
 import { seedGenesisPillars } from './genesis/pillars-seeder.js';
+import { seedGenesisPlasma } from './genesis/plasma-seeder.js';
+import { seedGenesisLegacyPillars } from './genesis/legacy-pillars-seeder.js';
+import { seedGenesisSporks } from './genesis/sporks-seeder.js';
+import { seedGenesisSwapEntries } from './genesis/swap-entries-seeder.js';
 
 /**
  * Run all Network seeders in order
@@ -16,7 +22,11 @@ export async function runNetworkSeeders(): Promise<void> {
   await seedNetworkAccounts();
   await seedNetworkTokens();
   await seedBridge();
-  await seedContractMethods();
+  await seedLiquidity();
+  console.log('Seeding contract methods...');
+  const methodCount = await syncContractMethods(db);
+  console.log(`  ✓ ${methodCount} contract methods seeded`);
+  console.log('✓ Contract methods seeded successfully\n');
 
   console.log('✓ All network seeders completed\n');
 }
@@ -30,6 +40,10 @@ export async function runGenesisSeeders(): Promise<void> {
 
   await seedGenesisAccounts();
   await seedGenesisPillars();
+  await seedGenesisLegacyPillars();
+  await seedGenesisPlasma();
+  await seedGenesisSporks();
+  await seedGenesisSwapEntries();
 
   console.log('✓ All genesis seeders completed\n');
 }
@@ -47,15 +61,26 @@ export async function runAllSeeders(): Promise<void> {
 }
 
 /**
- * Main entry point for running seeders
+ * Main entry point for running seeders. Seeds an empty database once and
+ * skips a seeded one, because the seeders overwrite indexed balances and
+ * supplies and duplicate the genesis pillars.
  */
 async function main() {
   try {
     // Connect to database
     await connectDatabase();
 
-    // Run all seeders
-    await runAllSeeders();
+    const state = await seedState(db);
+    if (state === 'seeded') {
+      console.log('✓ Database already seeded, skipping seeders\n');
+    } else if (state === 'partial') {
+      throw new Error(
+        'Database holds rows from an unfinished seed run. Run `npm run reset` to start again.',
+      );
+    } else {
+      await runAllSeeders();
+      await markSeeded(db);
+    }
 
     // Disconnect from database
     await disconnectDatabase();

@@ -2,27 +2,17 @@ import type { ActionContext, ActionHandler } from '../types.js';
 
 export const cancelFuse: ActionHandler = async (ctx: ActionContext): Promise<void> => {
   const { tx, decoded, receiveBlock } = ctx;
+  const id = decoded.id.toString().replace(/^0x/, '');
 
-  if (!decoded.id) {
-    throw new Error('Plasma.CancelFuse: missing id');
-  }
-
-  const original = await tx('nom_account_blocks')
-    .where({ hash: decoded.id.toString().replace(/^0x/, '') })
+  // The contract deletes a fusion when it is cancelled, so a successful
+  // cancel always refers to an active fusion.
+  const plasma = await tx('nom_plasma')
+    .where({ hash: id })
+    .whereNull('ended_at')
     .select('id')
     .first();
-  if (!original) {
-    console.warn(`Plasma.CancelFuse: original block ${decoded.id} not found, skipping`);
-    return;
-  }
-
-  const plasma = await tx('nom_plasma')
-    .where({ account_block_id: original.id, ended_at: null })
-    .select('id', 'from_account_id', 'to_account_id', 'amount')
-    .first();
   if (!plasma) {
-    console.warn(`Plasma.CancelFuse: active plasma row for ${decoded.id} not found, skipping`);
-    return;
+    throw new Error(`Plasma.CancelFuse: active fusion not found for ${id}`);
   }
 
   await tx('nom_plasma').where({ id: plasma.id }).update({ ended_at: receiveBlock.createdAt });

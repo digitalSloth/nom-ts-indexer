@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import type { ActionContext, KnexTransactionClient } from '../../../src/actions/process/types.js';
+import type { ActionContext } from '../../../src/actions/process/types.js';
 
 /**
  * Creates a mock knex transaction that supports the `tx('table').where().first()` pattern.
@@ -18,13 +18,34 @@ export function makeMockTx(): any {
     const builder: any = {};
 
     const chainMethods = [
-      'where', 'andWhere', 'orWhere', 'whereIn', 'whereNotIn',
-      'whereNull', 'whereNotNull',
-      'leftJoin', 'innerJoin', 'rightJoin', 'join',
-      'select', 'orderBy', 'limit', 'offset', 'groupBy', 'having',
-      'count', 'max', 'min', 'sum',
-      'insert', 'update', 'del', 'delete',
-      'returning', 'onConflict', 'merge',
+      'where',
+      'andWhere',
+      'orWhere',
+      'whereIn',
+      'whereNotIn',
+      'whereNull',
+      'whereNotNull',
+      'leftJoin',
+      'innerJoin',
+      'rightJoin',
+      'join',
+      'select',
+      'orderBy',
+      'limit',
+      'offset',
+      'groupBy',
+      'having',
+      'count',
+      'max',
+      'min',
+      'sum',
+      'insert',
+      'update',
+      'del',
+      'delete',
+      'returning',
+      'onConflict',
+      'merge',
     ];
 
     for (const method of chainMethods) {
@@ -50,7 +71,7 @@ export function makeMockTx(): any {
         const val = dequeue();
         // Always return an array from `then` — knex `.returning()` returns arrays.
         // Select queries use `.first()` which bypasses `then` and returns a single object.
-        const result = Array.isArray(val) ? val : (val != null ? [val] : []);
+        const result = Array.isArray(val) ? val : val != null ? [val] : [];
         return Promise.resolve(result).then(resolve, reject);
       } catch (err) {
         if (reject) return Promise.reject(err).then(resolve, reject);
@@ -77,12 +98,15 @@ export function makeMockTx(): any {
 /**
  * Creates a mock ActionContext with sensible defaults.
  */
-export function makeActionContext(overrides: {
-  tx?: any;
-  receiveBlock?: Partial<ActionContext['receiveBlock']>;
-  sendBlock?: Partial<ActionContext['sendBlock']>;
-  decoded?: Record<string, any>;
-} = {}): ActionContext {
+export function makeActionContext(
+  overrides: {
+    tx?: any;
+    receiveBlock?: Partial<ActionContext['receiveBlock']>;
+    frontierMomentum?: Partial<ActionContext['frontierMomentum']>;
+    sendBlock?: Partial<ActionContext['sendBlock']>;
+    decoded?: Record<string, any>;
+  } = {},
+): ActionContext {
   return {
     tx: overrides.tx ?? makeMockTx(),
     receiveBlock: {
@@ -90,6 +114,11 @@ export function makeActionContext(overrides: {
       momentumId: 100,
       createdAt: new Date('2024-01-01T00:00:00Z'),
       ...overrides.receiveBlock,
+    },
+    frontierMomentum: {
+      height: 1000n,
+      timestamp: new Date('2024-01-01T00:00:00Z'),
+      ...overrides.frontierMomentum,
     },
     sendBlock: {
       id: 10,

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeMockKnex, type MockKnex } from '../../helpers/mock-knex.js';
 import { linkPairedAccountBlock } from '../../../src/actions/indexer/link-paired-account-block.js';
 

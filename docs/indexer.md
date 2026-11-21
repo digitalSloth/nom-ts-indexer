@@ -1,16 +1,16 @@
 # Indexer Architecture
 
-How data flows from the Zenon Network into the database. Covers the ingestion pipeline, action dispatch, registries, partitioning, seeders, and webhooks.
+How data flows from the Zenon Network into the database. Covers the ingestion pipeline, action dispatch, registries, seeders, and webhooks.
 
-For building plugins, see [plugins.md](plugins.md).
+For the tables, see [schema.md](schema.md). For webhook payloads, see [webhooks.md](webhooks.md). For building plugins, see [plugins.md](plugins.md).
 
 ## Data flow
 
 ```
 Zenon Network
    │
-   │  HTTP RPC (historical)            WebSocket (real-time)
-   ▼                                   ▼
+   │  WebSocket RPC: momentum batches (both modes); subscription + frontier poll set the real-time target
+   ▼
 ZenonClient .................. src/services/zenon-client.ts
    │
    ▼
@@ -31,23 +31,28 @@ IndexerService ............... src/services/indexer.ts
 `src/index.ts`:
 
 1. `dotenv.config()`
-2. `databaseService.connect()`
-3. `indexerService.start()`
-4. Wires SIGINT / SIGTERM / unhandled rejection to graceful shutdown.
+2. `connectDatabase()` (`src/database/knex.ts`)
+3. `apiServer.start(apiConfig.port)`: serves `/health`
+4. `indexerService.start()`. With `EXIT_AFTER_SYNC=true`, the process shuts down once historical sync ends.
+5. Wires SIGINT, SIGTERM, uncaught exceptions and unhandled rejections to graceful shutdown.
 
 `IndexerService.start()`:
 
-1. `zenonClient.initialize()` — opens RPC + WS clients.
-2. `obtainLock()` — Redis-backed distributed lock with 30s TTL, extended every 20s. Fails fast if `indexer:emergency_lock` is set.
-3. `partitionManager.checkAndPartition()` — converts huge tables to partitioned ones on PostgreSQL.
-4. Preload registries from the database.
-5. Load and initialize plugins.
-6. Read `indexer_state.lastIndexedMomentum`.
-7. Read network frontier height.
+1. Read the resume height (`databaseService.getCurrentHeight()`).
+2. Start the control poll (2 s): it reads `emergency_lock` and consumes `restart`. While `emergency_lock` is set, wait here without a node connection or lock.
+3. `zenonClient.initialize(anchor)` — connects to the first healthy node in `ZNN_WS_URL` (see [Node failover](#node-failover)).
+4. `obtainLock()` — Redis-backed instance lock (`lock`) with 30s TTL, extended every 20s. Throws if another instance holds it. Then sets `indexer_state.is_running`.
+5. On a seeded database, add any embedded contract methods the SDK defines that `nom_contract_methods` lacks (`syncContractMethods`). Then preload `contractRegistry` and `pillarRegistry`.
+6. Load and initialize plugins, then `pluginRegistry.catchUp()` replays the blocks each plugin has not seen.
+7. Read the network frontier height and start the 5 min failback timer.
 8. If behind: enter historical batch loop.
-9. Once caught up: subscribe to WebSocket stream.
+9. With `EXIT_AFTER_SYNC=true`, stop here. Otherwise start the real-time worker.
 
-Shutdown unsubscribes, releases lock, shuts down plugins, and disconnects the database.
+### Pause and restart
+
+Both loops check the pause before each batch, so a batch never pauses midway. While paused the process keeps `lock` alive, counts no stall, and counts no node failure. In real-time mode the subscription and frontier poll keep raising the target height. The `restart` key (set with a 120 s TTL) is consumed once and sends the process SIGTERM, which ends the batch after the momentum in flight and exits with code 0. All keys carry `REDIS_KEY_PREFIX`.
+
+Shutdown stops the API server, then `stop()` unsubscribes, waits for the momentum in flight, clears `is_running`, shuts down plugins and releases `lock`. The node connection and the database close last.
 
 ## IndexerService lifecycle
 
@@ -57,56 +62,87 @@ A single row in `indexer_state`:
 
 | Column | Meaning |
 |--------|---------|
-| `lastIndexedMomentum` (BigInt) | Height of the most recent committed momentum |
-| `isRunning` (Boolean) | True while the service holds the lock |
-| `updatedAt` | Touched on every commit |
+| `last_indexed_momentum` (bigint) | Height of the most recent committed momentum |
+| `is_running` (boolean) | Set after the lock is taken, cleared by `stop()`. A crash or a no-healthy-node exit leaves it set |
+| `seeded_at` | Set once `db:seed` finishes (see [Seeders](#seeders)) |
+| `updated_at` | Touched on every commit |
+
+When `last_indexed_momentum` is 0, indexing resumes above `START_HEIGHT` if it is set, otherwise above the highest stored momentum.
 
 ### Historical batch loop
 
 ```ts
-while (currentHeight < frontierHeight - 1) {
+while (currentHeight < frontierHeight) {
   const momentums = await zenonClient.getMomentumsByHeight(startHeight, batchSize);
   const blocksByHash = await fetchAccountBlocksForBatch(momentums);
 
   for (const momentum of momentums) {
     await processOneMomentum(momentum, blocksByHash.get(momentum.hash));
   }
-
-  await databaseService.updateIndexerState({ lastIndexedMomentum: lastHeight });
-
-  if (currentHeight % 100_000 === 0) await partitionManager.checkAndPartition();
 }
 ```
 
 Key points:
 
 - **Batch size** from `BATCH_SIZE` env var (1–1000, default 100).
-- **Frontier-minus-one**: we never index the network's current tip — it can still be rejected.
+- **Up to the frontier**: historical sync and the real-time worker both index up to and including the frontier momentum.
 - **Webhooks and plugins fire after commit** — failures never roll back indexer state.
+- **Missing blocks fail the batch.** If the node returns no block for a hash in a momentum's content, the momentum is not committed.
 
 ### `processOneMomentum`
 
 Each momentum is processed in a single transaction:
 
-1. `insertMomentum` — upserts the momentum row, returns an `IndexedMomentumEvent`.
-2. `insertAccountBlock` for each block — upserts the block, runs ABI action dispatch, returns an `IndexedAccountBlockEvent`.
-3. After commit: dispatch webhooks and plugin events using the pre-built events.
+1. `insertMomentum` — upserts the momentum row, counts it towards its producer pillar (resetting every pillar's epoch count at a new epoch), sets the expiry of time challenges that end with it, and returns an `IndexedMomentumEvent`.
+2. `insertAccountBlock` for each block — inserts the block, links its paired and descendant blocks, runs ABI action dispatch and updates balances, then returns an `IndexedAccountBlockEvent`. A block already stored returns `null` and writes nothing, so plugins skip it.
+3. `refreshPillarRanks` — recomputes pillar ranks when a weight, registration or revocation in this momentum changed them (see [schema.md](schema.md#pillar-metrics)).
+4. `setLastIndexedMomentum` — stores the momentum's height in `indexer_state`, so the resume point always matches the last committed momentum.
+5. After commit: dispatch webhooks, then plugin events, using the pre-built events. Plugin dispatch is awaited, so a slow plugin slows indexing. After a crash before dispatch, the restart resumes above the momentum and plugin catch-up replays its account blocks (`onMomentum` is not replayed). Webhooks are not replayed.
 
 The events are built from data already in scope during the insert — no DB re-read required.
 
 ### Real-time path
 
-After the batch loop catches up, `zenonClient.subscribeToMomentums(callback)` opens a WS subscription. Each incoming momentum runs through `processSingleMomentum` — same code path as historical, just one momentum at a time.
+After the batch loop catches up, one worker indexes new momentums with the same `processBatch` path as historical sync.
+
+- **Target height.** The WebSocket subscription and a 30 s `getFrontierMomentum` poll only raise the worker's target height. The poll covers notifications lost after a reconnect, because the SDK reconnects the socket but does not resubscribe.
+- **In order, never skipped.** The worker indexes `currentHeight + 1` up to the target. A missed notification (N, then N+2) still indexes N+1.
+- **Retries.** A failed batch is retried from the failed height with backoff, 1 s doubling to 60 s. Historical sync retries the same way, except that an empty batch from the node ends historical sync and hands over to the real-time worker.
+- **Stalls.** In real-time mode, if no momentum is indexed for `STALL_EXIT_SECONDS` (default 300), the indexer fails over (see below). Historical sync has no stall check.
+- **Shutdown.** `stop()` waits for the momentum in flight.
+
+### Node failover
+
+`ZNN_WS_URL` lists one or more nodes, primary first. `src/services/zenon-client.ts` holds one connection, and `src/services/node-probe.ts` checks the nodes over separate short-lived WebSockets.
+
+A node is healthy when all of these hold:
+
+1. It answers within 10 s.
+2. It reports the configured `CHAIN_ID`.
+3. Its frontier has reached the last indexed height, and its momentum at that height has the hash stored in `nom_momentums`.
+4. Its frontier trails the most advanced healthy node by at most 10 momentums.
+
+Switches:
+
+- **Startup** connects to the first healthy node in list order.
+- **Failover** runs after 3 failed batches or frontier polls in a row, or a real-time stall. It reconnects to the first healthy node, which may be the current one, and restores the momentum subscription.
+- **Failback** runs every 5 minutes while on a backup, and moves to a higher-priority node once it is healthy.
+- **No healthy node** on a failover releases the lock and exits with code 1, for the restart policy to retry.
+
+Switches run between batches, so no indexing call is in flight. Every `ZenonClient` call times out after 60 s (a connect after 30 s), so an unresponsive node counts as a failure. The token lookup in `tokenRegistry` calls the SDK directly and has no timeout. Switching nodes cannot change indexed data: momentums are matched by hash, and the hash check rejects a node on another chain or fork.
 
 ## Action dispatch
 
-After an account block is inserted, `dispatchAction(tx, accountBlock, pairedBlock)` runs inside the same transaction:
+Every embedded contract call ends in a `ContractReceive` block whose `data` holds an 8-byte status: `1` when the call succeeded, `2` when it failed. A failed call is fully rolled back on chain, and any funds it carried come back in a refund send. The indexer stores the status in `nom_account_blocks.call_status` on the receive, and sets `call_failed` on the paired send when the status is `2`, whichever of the two blocks is indexed first. A receive whose data is not an 8-byte status of `1` or `2` fails its momentum, which is then retried.
 
-1. Only `ContractReceive` blocks trigger further work.
-2. Looks up the paired send block.
-3. Skips if the send wasn't ABI-recognised (no `contractMethodId`).
-4. Resolves `{ contractName, methodName }` via `contractRegistry.getMethod()`.
-5. Invokes the matching handler — one per contract method.
+After a block is inserted, `insertAccountBlock` calls `dispatchAction(tx, receiveBlock, pairedSendBlock, frontierMomentum)` inside the same transaction when all of these hold:
+
+1. The block is a `ContractReceive` with status `1`.
+2. Its paired send block is ABI-recognised (it has a `contractMethodId`).
+
+`dispatchAction` resolves `{ contractName, methodName }` via `contractRegistry.getMethod()`, reads the send block's decoded arguments and invokes the handler registered for that method. Methods with no handler are logged once.
+
+Because only successful calls reach a handler, handlers never repeat the contract's validation. A handler records what the contract changed. Where that depends on more than the call's inputs, it models the contract's own logic: time challenges, vote tallies, payouts read from the receive's descendant blocks.
 
 ### Handler layout
 
@@ -115,13 +151,20 @@ src/actions/process/
 ├── dispatcher.ts            # invokes a registered handler
 ├── registry.ts              # registerHandler / getHandler
 ├── types.ts                 # ActionContext, ActionHandler
+├── expiry.ts                # expiryDate(): clamps contract expiry times to a storable date
 ├── index.ts                 # imports each contract folder
-├── pillar/                  # Register, RegisterLegacy, UpdatePillar, Revoke, Delegate, Undelegate
-├── token/                   # IssueToken, UpdateToken, Mint, Burn
-├── plasma/                  # Fuse, CancelFuse
-├── stake/                   # Stake, Cancel
-├── sentinel/                # Register, Revoke
-└── liquidity/               # LiquidityStake, CancelLiquidityStake
+├── accelerator/             # projects, phases, votes, payouts
+├── bridge/                  # wraps, unwraps, networks, settings, governance shared with liquidity
+├── htlc/                    # hashed timelocks and proxy unlock settings
+├── ptlc/                    # point timelocks
+├── liquidity/               # liquidity stakes, token tuples, settings
+├── pillar/                  # pillars, delegations, QSR deposits
+├── plasma/                  # fusions
+├── sentinel/                # sentinels, QSR deposits
+├── spork/                   # sporks
+├── stake/                   # stakes
+├── swap/                    # legacy swap retrievals
+└── token/                   # tokens, mints, burns, rewards
 ```
 
 Handlers are registered in each folder's `index.ts`:
@@ -136,11 +179,15 @@ registerHandler('Pillar Contract', 'Register', register);
 
 ```ts
 interface ActionContext {
-  tx: any;                     // knex transaction — use for every DB operation
+  tx: Knex.Transaction;        // use for every DB operation
   receiveBlock: {
     id: number;
     momentumId: number;
-    createdAt: Date;
+    createdAt: Date;           // confirmation momentum time
+  };
+  frontierMomentum: {
+    height: bigint;            // the receive's acknowledged momentum, which the
+    timestamp: Date;           // contract reads as its frontier while it runs
   };
   sendBlock: {
     id: number;
@@ -151,34 +198,51 @@ interface ActionContext {
     hash: string;
     createdAt: Date;
   };
-  decoded: Record<string, any>; // ABI-decoded args
+  decoded: Record<string, any>; // ABI-decoded args: integers over 48 bits as decimal strings, smaller ones as numbers
 }
 ```
 
+Contract rules that use the current height or time (expiries, delays, enforcement heights, voting periods) use `frontierMomentum`, not `receiveBlock.createdAt`.
+
+`dispatchAction` throws when a recognised method's send has no decoded arguments, so the momentum fails and is retried.
+
 ### Handler conventions
 
-- **Idempotency**: handlers can be invoked twice for the same block (crash recovery). Use `findFirst` before `create`, or filter by `endedAt: null` for cancel-style operations.
-- **Validation**: `throw` for malformed input. `console.warn` + `return` for valid-but-skippable cases (zero amounts, missing entities). Never silently swallow.
-- **Registries**: use `accountRegistry.getOrCreate(tx, address)` — never call the DB directly for account lookups.
+- **No validation.** The call already succeeded on chain. Do not check permissions, limits or state preconditions.
+- **Lookups throw.** A row a successful call depends on must exist. If it is missing, throw `<Contract>.<Method>: <thing> not found for <key>`. The momentum then fails and is retried, so a divergence stops the indexer instead of corrupting data.
+- **Descendant blocks.** A receive's descendant sends are linked (`parent_id`) before its handler runs. Read them when the contract's output depends on state the indexer does not hold, such as its balance.
+- **Registries.** Use `accountRegistry.getOrCreate(tx, address)` for accounts and `tokenRegistry.getOrLoad(tx, standard)` for tokens.
+- **Pillar metrics.** A handler that changes a delegation, registers or revokes a pillar, or adds or changes an Accelerator-Z item or vote keeps the metrics current through `src/actions/indexer/pillar-metrics.ts`. ZNN balance changes move pillar weight inside `updateAccountTokenBalance`.
 
 ### Registered handlers
 
-| Contract | Method | Handler | Tables |
-|----------|--------|---------|--------|
-| Pillar Contract | Register, RegisterLegacy | `pillar/register*.ts` | `nom_pillars` |
-| Pillar Contract | UpdatePillar | `pillar/update-pillar.ts` | `nom_pillars`, `nom_pillar_update_histories` |
-| Pillar Contract | Revoke | `pillar/revoke.ts` | `nom_pillars` |
-| Pillar Contract | Delegate, Undelegate | `pillar/delegate.ts`, `pillar/undelegate.ts` | `nom_delegations` |
-| Token Contract | IssueToken, UpdateToken | `token/issue-token.ts`, `token/update-token.ts` | `nom_tokens` |
-| Token Contract | Mint, Burn | `token/mint.ts`, `token/burn.ts` | `nom_token_mints/burns`, `nom_tokens` |
-| Plasma Contract | Fuse, CancelFuse | `plasma/fuse.ts`, `plasma/cancel-fuse.ts` | `nom_plasma` |
-| Stake Contract | Stake, Cancel | `stake/stake.ts`, `stake/cancel.ts` | `nom_stakes` |
-| Sentinel Contract | Register, Revoke | `sentinel/register.ts`, `sentinel/revoke.ts` | `nom_sentinels` |
-| Liquidity Contract | LiquidityStake, CancelLiquidityStake | `liquidity/*.ts` | `nom_stakes` |
+| Contract | Methods | Tables |
+|----------|---------|--------|
+| Pillar | Register, RegisterLegacy, UpdatePillar, Revoke | `nom_pillars`, `nom_pillar_update_histories`, `nom_legacy_pillar_entries` |
+| Pillar | Delegate, Undelegate | `nom_delegations`, `nom_pillars` (weight) |
+| Pillar, Sentinel | DepositQsr, WithdrawQsr (Register consumes the deposit) | `nom_qsr_deposits` |
+| Sentinel | Register, Revoke | `nom_sentinels` |
+| Token | IssueToken, UpdateToken, Mint, Burn | `nom_tokens`, `nom_token_mints`, `nom_token_burns`, `nom_account_rewards`, `nom_account_tokens` (the token contract's balance) |
+| Plasma | Fuse, CancelFuse | `nom_plasma` |
+| Stake | Stake, Cancel | `nom_stakes` |
+| Liquidity | LiquidityStake, CancelLiquidityStake, UnlockLiquidityStakeEntries | `nom_stakes` |
+| Liquidity | SetTokenTuple, SetIsHalted, SetAdditionalReward | `nom_liquidity_token_tuples`, `nom_liquidity_settings`, `nom_time_challenges` |
+| Liquidity | ChangeAdministrator, NominateGuardians, ProposeAdministrator, Emergency | `nom_liquidity_admins`, `nom_liquidity_guardians`, `nom_time_challenges`, `nom_liquidity_settings` |
+| Accelerator | CreateProject, AddPhase, UpdatePhase, Update, Donate, VoteByName, VoteByProdAddress | `nom_accelerator_projects`, `nom_accelerator_phases`, `nom_votes`, `nom_pillars` (engagement) |
+| Bridge | WrapToken, UpdateWrapRequest, UnwrapToken, Redeem, RevokeUnwrapRequest | `nom_bridge_wraps`, `nom_bridge_unwraps`, `nom_bridge_networks`, `nom_account_rewards` |
+| Bridge | SetNetwork, RemoveNetwork, SetNetworkMetadata, SetTokenPair, RemoveTokenPair | `nom_bridge_networks`, `nom_bridge_network_tokens`, `nom_time_challenges` |
+| Bridge | Halt, Unhalt, Emergency, ChangeTssECDSAPubKey, SetAllowKeyGen, SetBridgeMetadata, SetOrchestratorInfo | `nom_bridge_settings`, `nom_bridge_admins`, `nom_time_challenges` |
+| Bridge | ChangeAdministrator, NominateGuardians, ProposeAdministrator | `nom_bridge_admins`, `nom_bridge_guardians`, `nom_time_challenges` |
+| HTLC | Create, Unlock, Reclaim, AllowProxyUnlock, DenyProxyUnlock | `nom_htlcs`, `nom_accounts.is_htlc_proxy_unlock_allowed` |
+| PTLC | Create, CreateWithReclaimLock, Unlock, ProxyUnlock, Reclaim, ReclaimWithSignature | `nom_ptlcs` |
+| Spork | CreateSpork, ActivateSpork | `nom_sporks` |
+| Swap | RetrieveAssets | `nom_swap_entries` |
+
+Methods with no handler change no state the indexer keeps: `Update` and `CollectReward` on the reward contracts (rewards arrive as mints), liquidity `Fund`, `BurnZnn` and `Donate` (plain transfers), and bridge `SetRedeemDelay` (go-zenon has no implementation, so every call fails). Their calls are still stored with decoded arguments.
 
 ## Registries
 
-In-memory caches under `src/services/registries/`. All singletons, loaded once at startup.
+In-memory caches under `src/services/registries/`, all singletons. `contractRegistry` and `pillarRegistry` load at startup. `accountRegistry` and `tokenRegistry` start empty and fill on demand.
 
 | Registry | Caches | Hot path | Notes |
 |----------|--------|----------|-------|
@@ -189,50 +253,21 @@ In-memory caches under `src/services/registries/`. All singletons, loaded once a
 
 The registries are key to throughput — ~99% of lookups are O(1) Map hits.
 
-## Partitioning
-
-PostgreSQL only. `src/database/partition-manager.ts`.
-
-| Setting | Value |
-|---------|-------|
-| Tables | `nom_momentums`, `nom_account_blocks` |
-| Trigger threshold | 5,000,000 rows |
-| Strategy | RANGE on `height`, 1M rows per partition |
-| Re-check cadence | Startup + every 100k momentums during historical indexing |
-
-When the threshold is reached:
-
-1. Rename existing table → `<name>_old`.
-2. Create new partitioned parent.
-3. Create partitions covering existing range + two future ranges.
-4. `INSERT INTO <name> SELECT * FROM <name>_old`.
-5. Recreate indexes.
-6. Drop `<name>_old`.
-
-All queries continue working unchanged — PostgreSQL handles partition routing transparently.
-
 ## Seeders
 
-`src/seeders/`. Run via `npm run seed`. Order:
+`src/database/seeders/`. Run via `npm run db:seed` after `npm run build`. Order:
 
-1. **Network seeders** — embedded contract accounts, tokens, bridge networks, contract methods.
-2. **Genesis seeders** — accounts, pillars, momentums, account blocks from `json/genesis.json`.
+1. **Network seeders**: burn address, embedded contract accounts, ZNN and QSR, the bridge and liquidity starting state (administrator, settings rows), contract methods. The indexer also adds missing contract methods on every start, so a newer SDK's methods reach a seeded database.
+2. **Genesis seeders**: account balances, pillars, legacy pillar entries, fusions, sporks and legacy swap entries. Genesis times come from `GenesisTimestampSec`.
 
-All seeders are upsert-only and safe to re-run.
+The ZNN and QSR network seeder and the genesis seeders read the file at `GENESIS_PATH`. Its default, `json/genesis.json`, is not shipped. Set it to `json/genesis-mainnet.json` or `json/genesis-devnet.json` to match `CHAIN_ID`. The seeders do not check the chain id.
+
+`db:seed` runs only on an empty database, and sets `indexer_state.seeded_at` once every seeder finishes. A later run sees the marker and skips, because the seeders overwrite indexed balances and supplies and would duplicate the genesis pillars. Seeded rows without the marker mean a seed run stopped partway, so `db:seed` exits with an error that tells you to run `npm run reset`.
 
 ## Webhooks
 
-Loaded once at startup from `webhooks.json` (or `WEBHOOK_URL` env var). Two event types:
-
-- `momentum.inserted` — fired after each momentum commits.
-- `account_block.inserted` — fired per account block.
-
-Delivery is fire-and-forget with 3 attempts and exponential backoff. If `secret` is set, requests include `X-Webhook-Signature: sha256=<hex>`.
-
-Configuration is read once on startup — restart to change endpoints.
+`src/webhooks/dispatcher.ts` posts `momentum.inserted` and `account_block.inserted` after each momentum commits, fire-and-forget. Configuration is read once at startup, so restart to change endpoints. Configuration, payloads, delivery and signature verification are in [webhooks.md](webhooks.md).
 
 ## Database schema
 
-40+ tables, all prefixed `nom_`. Core tables: `nom_chains`, `nom_accounts`, `nom_tokens`, `nom_momentums`, `nom_account_blocks`. Supporting domains: pillars, staking, plasma, sentinels, bridge, accelerator, votes. `indexer_state` tracks current sync height.
-
-Uses Knex for query building. Migrations are `.cjs` files in `src/database/migrations/`.
+The tables, storage conventions and block linking are in [schema.md](schema.md).

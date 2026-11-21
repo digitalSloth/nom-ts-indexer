@@ -9,6 +9,8 @@ class CacheService {
       port: parseInt(process.env.REDIS_PORT || '6379'),
       password: process.env.REDIS_PASSWORD,
       db: parseInt(process.env.REDIS_DB || '0'),
+      // Every key is namespaced, so networks can share one Redis database
+      keyPrefix: process.env.REDIS_KEY_PREFIX || 'indexer:',
     };
   }
 

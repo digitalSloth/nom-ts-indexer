@@ -56,9 +56,7 @@ describe('ContractRegistry', () => {
 
   it('getMethod returns method info', async () => {
     mockDb.resolveNext([]);
-    mockDb.resolveNext([
-      { id: 7, name: 'doStuff', fingerprint: '0xff', contract_name: 'Foo' },
-    ]);
+    mockDb.resolveNext([{ id: 7, name: 'doStuff', fingerprint: '0xff', contract_name: 'Foo' }]);
     await contractRegistry.load();
 
     expect(contractRegistry.getMethod(7)).toEqual({
@@ -70,9 +68,7 @@ describe('ContractRegistry', () => {
 
   it('uses "Common" for methods without a contract', async () => {
     mockDb.resolveNext([]);
-    mockDb.resolveNext([
-      { id: 1, name: 'generic', fingerprint: '0x1', contract_name: null },
-    ]);
+    mockDb.resolveNext([{ id: 1, name: 'generic', fingerprint: '0x1', contract_name: null }]);
     await contractRegistry.load();
 
     expect(contractRegistry.getMethodId('Common', '0x1')).toBe(1);

@@ -54,22 +54,37 @@ describe('databaseService', () => {
     expect(builder.update).toHaveBeenCalled();
   });
 
+  it('setLastIndexedMomentum updates the state row through the given transaction', async () => {
+    const tx = makeMockKnex();
+    tx.resolveNext(1);
+    await databaseService.setLastIndexedMomentum(tx as any, 42n);
+
+    expect(tx.lastBuilder().update).toHaveBeenCalledWith({
+      last_indexed_momentum: 42n,
+      updated_at: expect.any(Date),
+    });
+  });
+
   describe('getCurrentHeight', () => {
-    it('returns last_indexed_momentum from IndexerState when set', async () => {
-      mockDb.resolveNext({ id: 1, last_indexed_momentum: BigInt(123), is_running: false });
+    it('returns last_indexed_momentum from IndexerState as a bigint', async () => {
+      // pg returns bigint columns as strings
+      mockDb.resolveNext({ id: 1, last_indexed_momentum: '123', is_running: false });
       expect(await databaseService.getCurrentHeight()).toBe(BigInt(123));
     });
 
     it('falls back to MAX(momentum.height) when state height is zero', async () => {
       mockDb.resolveNext({ id: 1, last_indexed_momentum: BigInt(0), is_running: false });
-      mockDb.resolveNext({ height: BigInt(42) });
+      // pg returns bigint columns as strings
+      mockDb.resolveNext({ height: '42' });
       expect(await databaseService.getCurrentHeight()).toBe(BigInt(42));
+      // Without the alias Postgres names the column `max`
+      expect(mockDb.lastBuilder().max).toHaveBeenCalledWith('height as height');
     });
 
-    it('falls back to BigInt(1) when state height is zero and no momentums exist', async () => {
+    it('falls back to BigInt(0) when state height is zero and no momentums exist', async () => {
       mockDb.resolveNext({ id: 1, last_indexed_momentum: BigInt(0), is_running: false });
       mockDb.resolveNext({ height: null });
-      expect(await databaseService.getCurrentHeight()).toBe(BigInt(1));
+      expect(await databaseService.getCurrentHeight()).toBe(BigInt(0));
     });
   });
 
@@ -121,17 +136,28 @@ describe('databaseService', () => {
     expect(builder.first).toHaveBeenCalled();
   });
 
-  it('getStats merges Promise.all counts', async () => {
-    // Queue 5 count results — order depends on Promise.all implementation
-    mockDb.resolveNext({ count: '1' });
-    mockDb.resolveNext({ count: '2' });
-    mockDb.resolveNext({ count: '3' });
-    mockDb.resolveNext({ count: '4' });
-    mockDb.resolveNext({ count: '5' });
+  it('getStats reads row estimates from pg_class without COUNT(*)', async () => {
+    mockDb.raw.mockResolvedValueOnce({
+      rows: [
+        { relname: 'nom_momentums', estimate: '1000' },
+        { relname: 'nom_account_blocks', estimate: '5000' },
+        { relname: 'nom_accounts', estimate: '300' },
+        { relname: 'nom_tokens', estimate: '40' },
+      ],
+    });
 
     const stats = await databaseService.getStats();
 
-    expect(stats.momentums + stats.accountBlocks + stats.accounts + stats.tokens + stats.pillars).toBe(15);
+    expect(stats).toEqual({
+      momentums: 1000,
+      accountBlocks: 5000,
+      accounts: 300,
+      tokens: 40,
+      pillars: 0,
+    });
+    const sql = mockDb.raw.mock.calls[0][0] as string;
+    expect(sql).toContain('pg_class');
+    expect(sql.toLowerCase()).not.toContain('count(');
   });
 
   it('transaction invokes db.transaction', async () => {

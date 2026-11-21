@@ -1,73 +1,79 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { argsFor, buildersFor } from './helpers.js';
+
+const getOrCreate = vi.fn();
+vi.mock('../../../../src/services/registries/account-registry.js', () => ({
+  accountRegistry: { getOrCreate: (...args: any[]) => getOrCreate(...args) },
+}));
 
 const { unwrapToken } = await import('../../../../src/actions/process/bridge/unwrap-token.js');
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('unwrapToken', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
-  const defaultDecoded = {
-    networkClass: 1,
-    chainId: 1,
-    transactionHash: '0xtxhash',
-    logIndex: 0,
-    toAddress: 'z1qql0agp20rzy8e4e8z4fq0s',
-    tokenAddress: '0xtokenaddr',
-    amount: '1000000000',
-    signature: 'sig123',
-  };
-
   beforeEach(() => {
     tx = makeMockTx();
+    getOrCreate.mockReset();
+    getOrCreate.mockResolvedValue(33);
   });
 
-  it('creates new unwrap record', async () => {
-    tx.resolveNext({ id: 10 });                // findActiveBridgeNetwork
-    tx.resolveNext({ id: 20, token_id: 5 });    // bridgeNetworkToken
-    tx.resolveNext(null);                       // duplicate check (not found)
-    tx.resolveNext({});                         // insert
-    tx.resolveNext({ token_standard: 'zts1znnxxxxxxxxxxxxx9z4ulx' }); // token lookup
-    tx.resolveNext({});                         // update network totals
+  const run = () =>
+    unwrapToken(
+      makeActionContext({
+        tx,
+        decoded: {
+          networkClass: 2,
+          chainId: 1,
+          transactionHash: '0xtx',
+          logIndex: 4,
+          toAddress: 'z1qrecipient',
+          tokenAddress: '0xABC',
+          amount: '900',
+          signature: 'sig',
+        },
+        sendBlock: { id: 10, accountId: 1 },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(unwrapToken(ctx)).resolves.toBeUndefined();
+  it('records the unwrap for toAddress and leaves the network totals to the redeem', async () => {
+    tx.resolveNext({ id: 7 }); // network
+    tx.resolveNext({ token_id: 6 }); // token pair
+    tx.resolveNext({}); // insert unwrap
+
+    await run();
+
+    const [pairLookup] = buildersFor(tx, 'nom_bridge_network_tokens');
+    expect(pairLookup.where).toHaveBeenCalledWith({ bridge_network_id: 7, token_address: '0xabc' });
+    expect(getOrCreate).toHaveBeenCalledWith(tx, 'z1qrecipient');
+    expect(argsFor(tx, 'nom_bridge_unwraps', 'insert')).toEqual([
+      {
+        bridge_network_id: 7,
+        to_account_id: 33,
+        token_id: 6,
+        account_block_id: 10,
+        transaction_hash: '0xtx',
+        log_index: 4n,
+        signature: 'sig',
+        amount: '900',
+        created_at: CREATED_AT,
+        updated_at: CREATED_AT,
+      },
+    ]);
+    expect(argsFor(tx, 'nom_bridge_networks', 'update')).toEqual([]);
   });
 
-  it('rejects duplicate unwrap request', async () => {
-    tx.resolveNext({ id: 10 });
-    tx.resolveNext({ id: 20, token_id: 5 });
-    tx.resolveNext({ id: 99 });       // duplicate found
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await unwrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('duplicate'));
-  });
-
-  it('throws on missing required fields', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, transactionHash: undefined } });
-    await expect(unwrapToken(ctx)).rejects.toThrow('missing required fields');
-  });
-
-  it('warns if network not found', async () => {
+  it('throws when the token pair is not found', async () => {
+    tx.resolveNext({ id: 7 });
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await unwrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('network not found'));
+    await expect(run()).rejects.toThrow('Bridge.UnwrapToken: token pair not found for 0xabc');
   });
 
-  it('warns if token not redeemable', async () => {
-    tx.resolveNext({ id: 10 });
+  it('throws when the network is not found', async () => {
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await unwrapToken(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not redeemable'));
+    await expect(run()).rejects.toThrow('Bridge.UnwrapToken: network not found for 2/1');
   });
 });

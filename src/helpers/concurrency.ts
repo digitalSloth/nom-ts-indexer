@@ -18,7 +18,7 @@ export async function mapWithConcurrency<T, R>(
   let cursor = 0;
 
   const worker = async (): Promise<void> => {
-    while (true) {
+    for (;;) {
       const i = cursor++;
       if (i >= items.length) return;
       results[i] = await mapper(items[i], i);

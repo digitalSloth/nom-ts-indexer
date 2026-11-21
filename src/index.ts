@@ -38,15 +38,15 @@ async function main() {
     console.log('\n✓ Indexer is running. Press Ctrl+C to stop.\n');
   } catch (error) {
     console.error('Failed to start indexer:', error);
-    await shutdown();
-    process.exit(1);
+    await shutdown(1);
   }
 }
 
 /**
- * Gracefully shutdown the application
+ * Gracefully shutdown the application, then exit with `exitCode`, or with
+ * 1 if the shutdown itself fails.
  */
-async function shutdown() {
+async function shutdown(exitCode = 0) {
   console.log('\n\n🛑 Shutting down...');
 
   try {
@@ -63,7 +63,7 @@ async function shutdown() {
     await disconnectDatabase();
 
     console.log('✓ Shutdown complete');
-    process.exit(0);
+    process.exit(exitCode);
   } catch (error) {
     console.error('Error during shutdown:', error);
     process.exit(1);
@@ -71,18 +71,18 @@ async function shutdown() {
 }
 
 // Handle shutdown signals
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown());
+process.on('SIGTERM', () => shutdown());
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception:', error);
-  shutdown();
+  shutdown(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled rejection at:', promise, 'reason:', reason);
-  shutdown();
+  shutdown(1);
 });
 
 // Start the application

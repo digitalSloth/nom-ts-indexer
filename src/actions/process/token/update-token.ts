@@ -2,25 +2,16 @@ import type { ActionContext, ActionHandler } from '../types.js';
 import { accountRegistry } from '../../../services/registries/account-registry.js';
 
 export const updateToken: ActionHandler = async (ctx: ActionContext): Promise<void> => {
-  const { tx, decoded, sendBlock, receiveBlock } = ctx;
-
-  if (!decoded.tokenStandard || !decoded.owner) {
-    throw new Error('Token.UpdateToken: missing tokenStandard or owner');
-  }
+  const { tx, decoded, receiveBlock } = ctx;
 
   const tokenStandard = decoded.tokenStandard.toString();
   const token = await tx('nom_tokens')
     .where({ token_standard: tokenStandard })
-    .select('id', 'owner_id', 'is_mintable', 'total_supply')
+    .select('id', 'is_mintable', 'total_supply')
     .first();
 
   if (!token) {
-    console.warn(`Token.UpdateToken: token "${tokenStandard}" not found, skipping`);
-    return;
-  }
-  if (token.owner_id !== sendBlock.accountId) {
-    console.warn(`Token.UpdateToken: sender is not token owner, skipping`);
-    return;
+    throw new Error(`Token.UpdateToken: token not found for ${tokenStandard}`);
   }
 
   const newOwnerId = await accountRegistry.getOrCreate(tx, decoded.owner.toString());
@@ -34,7 +25,7 @@ export const updateToken: ActionHandler = async (ctx: ActionContext): Promise<vo
     updated_at: receiveBlock.createdAt,
   };
 
-  // mintable → non-mintable: collapse max_supply down to current total_supply
+  // Mintable to non-mintable: max_supply drops to the current total_supply
   if (token.is_mintable && !newIsMintable) {
     data.max_supply = token.total_supply;
   }

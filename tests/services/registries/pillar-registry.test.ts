@@ -36,12 +36,8 @@ describe('PillarRegistry', () => {
   });
 
   it('history does not overwrite live mappings', async () => {
-    mockDb.resolveNext([
-      { id: 1, producer_account_id: 10 },
-    ]);
-    mockDb.resolveNext([
-      { pillar_id: 99, producer_account_id: 10 },
-    ]);
+    mockDb.resolveNext([{ id: 1, producer_account_id: 10 }]);
+    mockDb.resolveNext([{ pillar_id: 99, producer_account_id: 10 }]);
 
     await pillarRegistry.load();
 

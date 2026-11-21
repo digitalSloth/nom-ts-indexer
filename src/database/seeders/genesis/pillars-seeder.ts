@@ -1,10 +1,8 @@
-import { promises as fs } from 'fs';
 import { db } from '../../knex.js';
 import { genesisPath } from '../../../config/genesis.js';
 import { accountRegistry } from '../../../services/registries/account-registry.js';
 import { DECIMALS } from '../../../constants/zenon.js';
-
-const GENESIS_TIMESTAMP = new Date('2021-11-24T12:00:00Z');
+import { genesisTimestamp, readGenesis } from './genesis-file.js';
 
 interface GenesisPillar {
   Name: string;
@@ -16,6 +14,7 @@ interface GenesisPillar {
 }
 
 interface GenesisData {
+  GenesisTimestampSec: number;
   PillarConfig: {
     Pillars: GenesisPillar[];
   };
@@ -28,14 +27,8 @@ interface GenesisData {
 export async function seedGenesisPillars(): Promise<void> {
   console.log(`Seeding genesis pillars from ${genesisPath}...`);
 
-  let genesisData: GenesisData;
-
-  try {
-    const fileContent = await fs.readFile(genesisPath, 'utf-8');
-    genesisData = JSON.parse(fileContent);
-  } catch (error) {
-    throw new Error(`Failed to read ${genesisPath}: ${error}`);
-  }
+  const genesisData = await readGenesis<GenesisData>();
+  const createdAt = genesisTimestamp(genesisData);
 
   const pillars = genesisData.PillarConfig.Pillars;
 
@@ -64,7 +57,7 @@ export async function seedGenesisPillars(): Promise<void> {
         momentum_rewards: pillarData.GiveBlockRewardPercentage,
         delegate_rewards: pillarData.GiveDelegateRewardPercentage,
         is_legacy: true,
-        created_at: GENESIS_TIMESTAMP,
+        created_at: createdAt,
       })
       .returning('id');
 
@@ -76,7 +69,7 @@ export async function seedGenesisPillars(): Promise<void> {
       momentum_rewards: pillarData.GiveBlockRewardPercentage,
       delegate_rewards: pillarData.GiveDelegateRewardPercentage,
       is_reward_change: false,
-      updated_at: GENESIS_TIMESTAMP,
+      updated_at: createdAt,
     });
 
     console.log(`  ✓ Pillar created: ${pillarData.Name}`);

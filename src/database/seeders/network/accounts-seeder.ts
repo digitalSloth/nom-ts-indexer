@@ -2,7 +2,7 @@ import { db } from '../../knex.js';
 import {
   EMBEDDED_CONTRACTS,
   BURN_ADDRESS,
-  BRIDGE_ADMIN_ADDRESS,
+  INITIAL_ADMINISTRATOR_ADDRESS,
 } from '../../../constants/zenon.js';
 
 /**
@@ -40,7 +40,7 @@ export async function seedNetworkAccounts(): Promise<void> {
   // Insert bridge admin address
   await db('nom_accounts')
     .insert({
-      address: BRIDGE_ADMIN_ADDRESS,
+      address: INITIAL_ADMINISTRATOR_ADDRESS,
       name: 'Bridge admin',
       is_embedded_contract: false,
     })

@@ -1,8 +1,8 @@
 {
     "ChainIdentifier": 69,
-    "ExtraData": "DEVNET INIT",
+    "ExtraData": "LOCAL DEV-NET",
     "GenesisTimestampSec": 1739923200,
-    "SporkAddress": "z1qzmzssx28dc0fmvlca05hyxk2kgkgu7n0cj8pl",
+    "SporkAddress": "z1qq9n7fpaqd8lpcljandzmx4xtku9w4ftwyg0mq",
     "PillarConfig": {
         "Pillars": [
             {
@@ -52,7 +52,7 @@
                 "tokenName": "ZNN",
                 "tokenSymbol": "ZNN",
                 "tokenDomain": "zenon.devnet",
-                "totalSupply": 110500000000000,
+                "totalSupply": 120500000000000,
                 "maxSupply": 9007199254740991,
                 "decimals": 8,
                 "isMintable": true,
@@ -65,7 +65,7 @@
                 "tokenName": "QSR",
                 "tokenSymbol": "QSR",
                 "tokenDomain": "zenon.devnet",
-                "totalSupply": 1060000000000000,
+                "totalSupply": 1163000000000000,
                 "maxSupply": 9007199254740991,
                 "decimals": 8,
                 "isMintable": true,
@@ -80,21 +80,21 @@
             {
                 "owner": "z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d",
                 "id": "85b559d52ef7e23b358cbceb12aeadcf5397bad860d8d50c4cd348246379e913",
-                "amount": 100000000000,
+                "amount": 1000000000000,
                 "withdrawHeight": 1,
                 "beneficiaryAddress": "z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d"
             },
             {
                 "owner": "z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d",
                 "id": "8d3a261582f0f7d01b0a7c6024da87e5637b5929cb71bc0f954cf14093e3059e",
-                "amount": 100000000000,
+                "amount": 1000000000000,
                 "withdrawHeight": 1,
                 "beneficiaryAddress": "z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d"
             },
             {
                 "owner": "z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d",
                 "id": "347ab55f43bf3e41cfedc07df54bdb30ead1704a1fbcef9e4205e8297e862126",
-                "amount": 100000000000,
+                "amount": 1000000000000,
                 "withdrawHeight": 1,
                 "beneficiaryAddress": "z1qq9n7fpaqd8lpcljandzmx4xtku9w4ftwyg0mq"
             }
@@ -125,6 +125,20 @@
                 "description": "bridge-liq",
                 "activated": false,
                 "enforcementHeight": 0
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000001",
+                "name": "libp2p",
+                "description": "Activates the libp2p networking stack",
+                "activated": true,
+                "enforcementHeight": 20
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000002",
+                "name": "dynamic-plasma",
+                "description": "Activates Dynamic Plasma",
+                "activated": true,
+                "enforcementHeight": 30
             }
         ]
     },
@@ -155,6 +169,26 @@
                 "BalanceList": {
                     "zts1qsrxxxxxxxxxxxxxmrhjll": 50000000000000,
                     "zts1znnxxxxxxxxxxxxx9z4ulx": 5000000000000
+                }
+            },
+            {
+                "Address": "z1qpeet8dcjg0m6x6m3tg437wnc42aa2nez2fzth",
+                "BalanceList": {
+                    "zts1qsrxxxxxxxxxxxxxmrhjll": 50000000000000,
+                    "zts1znnxxxxxxxxxxxxx9z4ulx": 5000000000000
+                }
+            },
+            {
+                "Address": "z1qqcam4ycu0ta8333hx38r5j2z3ry9jjfxkc7t5",
+                "BalanceList": {
+                    "zts1qsrxxxxxxxxxxxxxmrhjll": 50000000000000,
+                    "zts1znnxxxxxxxxxxxxx9z4ulx": 5000000000000
+                }
+            },
+            {
+                "Address": "z1qxemdeddedxplasmaxxxxxxxxxxxxxxxxsctrp",
+                "BalanceList": {
+                    "zts1qsrxxxxxxxxxxxxxmrhjll": 3000000000000
                 }
             }
         ]

@@ -2,7 +2,7 @@
 # For local development, prefer running the indexer directly on your host
 # machine against the dockerised Postgres/Redis (see README).
 
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
@@ -20,7 +20,9 @@ RUN npm ci
 COPY src ./src
 COPY tsconfig.json ./
 COPY json ./json
-COPY plugins.json ./
+# The committed example is the image's plugin set. A local plugins.json is
+# ignored by git and only used outside Docker.
+COPY plugins.example.json ./plugins.json
 
 # Build TypeScript for root + every plugin (also syncs plugin migrations).
 RUN npm run build
@@ -28,6 +30,10 @@ RUN npm run build
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001 && chown -R nodejs:nodejs /app
 USER nodejs
+
+# Reported as imageTag by /health
+ARG IMAGE_TAG=dev
+ENV INDEXER_IMAGE_TAG=$IMAGE_TAG
 
 # Start the indexer (overridden by docker-compose for the full-stack profile,
 # which runs migrations + seeders first).

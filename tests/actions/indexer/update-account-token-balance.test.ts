@@ -65,4 +65,37 @@ describe('updateAccountTokenBalance', () => {
     expect(builder.onConflict).toHaveBeenCalledWith(['account_id', 'token_id']);
     expect(builder.merge).toHaveBeenCalled();
   });
+
+  it('adds a positive delta to received and leaves sent unchanged', async () => {
+    tx.resolveNext({ balance: '50', sent: '30', received: '80' });
+
+    await updateAccountTokenBalance(tx, 1, 5, 100n);
+
+    const builder = tx.lastBuilder();
+    const insertCall = (builder.insert as any).mock.calls[0][0];
+    expect(insertCall).toMatchObject({ balance: '150', sent: '30', received: '180' });
+    expect(builder.merge).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: '150', sent: '30', received: '180' }),
+    );
+  });
+
+  it('adds the size of a negative delta to sent and leaves received unchanged', async () => {
+    tx.resolveNext({ balance: '200', sent: '0', received: '200' });
+
+    await updateAccountTokenBalance(tx, 1, 5, -50n);
+
+    const builder = tx.lastBuilder();
+    expect(builder.merge).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: '150', sent: '50', received: '200' }),
+    );
+  });
+
+  it('starts totals from zero when no row exists', async () => {
+    tx.resolveNext(null);
+
+    await updateAccountTokenBalance(tx, 1, 5, -100n);
+
+    const insertCall = (tx.lastBuilder().insert as any).mock.calls[0][0];
+    expect(insertCall).toMatchObject({ balance: '-100', sent: '100', received: '0' });
+  });
 });

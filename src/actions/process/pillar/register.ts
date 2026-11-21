@@ -6,29 +6,11 @@ import {
   PILLAR_QSR_STAKE_INCREASE_AMOUNT,
 } from '../../../constants/zenon.js';
 import { slugify } from '../../../helpers/slugify.js';
-import { assertRequiredFields } from '../../../helpers/assert-required.js';
-
-function assertPillarParams(decoded: Record<string, any>): void {
-  assertRequiredFields(
-    decoded,
-    [
-      'name',
-      'producerAddress',
-      'rewardAddress',
-      'giveBlockRewardPercentage',
-      'giveDelegateRewardPercentage',
-    ],
-    'Pillar.Register',
-  );
-  if (typeof decoded.name !== 'string' || decoded.name.length === 0) {
-    throw new Error('Pillar.Register: name is empty');
-  }
-}
+import { consumeQsrDeposit } from './qsr-deposit.js';
+import { markPillarRanksDirty } from '../../indexer/pillar-metrics.js';
 
 export const register: ActionHandler = async (ctx: ActionContext): Promise<void> => {
   const { tx, decoded, sendBlock, receiveBlock } = ctx;
-
-  assertPillarParams(decoded);
 
   const name = decoded.name as string;
   const producerAddress = decoded.producerAddress.toString();
@@ -37,7 +19,11 @@ export const register: ActionHandler = async (ctx: ActionContext): Promise<void>
   const producerAccountId = await accountRegistry.getOrCreate(tx, producerAddress);
   const withdrawAccountId = await accountRegistry.getOrCreate(tx, rewardAddress);
 
-  const countRow = await tx('nom_pillars').where({ is_legacy: false }).count('* as c').first();
+  // The contract prices the next pillar by the number of active, non-legacy pillars.
+  const countRow = await tx('nom_pillars')
+    .where({ is_legacy: false, revoked_at: null })
+    .count('* as c')
+    .first();
   const normalCount = Number(countRow?.c ?? 0);
   const qsrBurn =
     PILLAR_QSR_STAKE_BASE_AMOUNT + PILLAR_QSR_STAKE_INCREASE_AMOUNT * BigInt(normalCount);
@@ -58,4 +44,7 @@ export const register: ActionHandler = async (ctx: ActionContext): Promise<void>
     .returning('id');
 
   pillarRegistry.setPillarId(producerAccountId, pillar.id);
+  markPillarRanksDirty(tx);
+
+  await consumeQsrDeposit(ctx, 'Pillar.Register', qsrBurn);
 };

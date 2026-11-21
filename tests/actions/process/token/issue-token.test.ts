@@ -7,6 +7,15 @@ vi.mock('../../../../src/helpers/zts-from-hash.js', () => ({
 
 const { issueToken } = await import('../../../../src/actions/process/token/issue-token.js');
 
+function balanceUpserts(tx: any): any[] {
+  return tx.mock.calls
+    .map((call: any[], i: number) => [call[0], tx.mock.results[i].value])
+    .filter(([table]: [string]) => table === 'nom_account_tokens')
+    .map(([, builder]: [string, any]) => builder.insert.mock.calls[0])
+    .filter(Boolean)
+    .map((args: any[]) => args[0]);
+}
+
 describe('issueToken', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
@@ -14,8 +23,8 @@ describe('issueToken', () => {
     tokenName: 'MyToken',
     tokenSymbol: 'MTK',
     tokenDomain: 'example.com',
-    totalSupply: '1000000000',
-    maxSupply: '2000000000',
+    totalSupply: '500000000000',
+    maxSupply: '1000000000000',
     decimals: 8,
     isMintable: true,
     isBurnable: true,
@@ -26,49 +35,47 @@ describe('issueToken', () => {
     tx = makeMockTx();
   });
 
-  it('creates a new token', async () => {
-    tx.resolveNext(null); // no existing token
-    tx.resolveNext({});   // insert
+  it('upserts the token on its standard with the issue values', async () => {
+    tx.resolveNext({ id: 77 }); // upserted token id
+    await issueToken(makeActionContext({ tx, decoded: defaultDecoded }));
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(issueToken(ctx)).resolves.toBeUndefined();
-  });
-
-  it('skips if token already exists (idempotent)', async () => {
-    tx.resolveNext({ id: 99 }); // existing token found
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await expect(issueToken(ctx)).resolves.toBeUndefined();
-  });
-
-  it('throws on missing tokenName', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, tokenName: undefined } });
-    await expect(issueToken(ctx)).rejects.toThrow('missing required field "tokenName"');
-  });
-
-  it('throws on missing tokenSymbol', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, tokenSymbol: undefined } });
-    await expect(issueToken(ctx)).rejects.toThrow('missing required field "tokenSymbol"');
-  });
-
-  it('throws on missing totalSupply', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, totalSupply: undefined } });
-    await expect(issueToken(ctx)).rejects.toThrow('missing required field "totalSupply"');
-  });
-
-  it('throws on missing decimals', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, decimals: undefined } });
-    await expect(issueToken(ctx)).rejects.toThrow('missing required field "decimals"');
-  });
-
-  it('converts totalSupply and maxSupply to string via BigInt', async () => {
-    tx.resolveNext(null); // no existing token
-    tx.resolveNext({});   // insert
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { ...defaultDecoded, totalSupply: '500000000000', maxSupply: '1000000000000' },
+    const builder = tx.mock.results[0].value;
+    expect(builder.insert).toHaveBeenCalledWith({
+      owner_id: 1,
+      name: 'MyToken',
+      symbol: 'MTK',
+      domain: 'example.com',
+      token_standard: 'zts1newtokenxxxxxxxxxxx',
+      total_supply: '500000000000',
+      initial_supply: '500000000000',
+      max_supply: '1000000000000',
+      decimals: 8,
+      is_mintable: true,
+      is_burnable: true,
+      is_utility: false,
+      created_at: new Date('2024-01-01T00:00:00Z'),
     });
-    await expect(issueToken(ctx)).resolves.toBeUndefined();
+    expect(builder.onConflict).toHaveBeenCalledWith('token_standard');
+    expect(builder.merge).toHaveBeenCalled();
+  });
+
+  it('adds the issued supply to the token contract balance', async () => {
+    tx.resolveNext({ id: 77 }); // upserted token id
+    tx.resolveNext(null); // token contract balance lookup
+
+    await issueToken(
+      makeActionContext({ tx, decoded: defaultDecoded, sendBlock: { toAccountId: 3 } as any }),
+    );
+
+    expect(balanceUpserts(tx)).toEqual([
+      {
+        account_id: 3,
+        token_id: 77,
+        balance: '500000000000',
+        sent: '0',
+        received: '500000000000',
+        updated_at: new Date('2024-01-01T00:00:00Z'),
+      },
+    ]);
   });
 });

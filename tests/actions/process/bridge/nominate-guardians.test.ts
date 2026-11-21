@@ -1,85 +1,90 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
+import { BRIDGE_ADMINISTRATOR_DELAY } from '../../../../src/constants/zenon.js';
+import { argsFor, buildersFor } from './helpers.js';
 
+const passTimeChallenge = vi.fn();
 vi.mock('../../../../src/actions/process/bridge/time-challenge.js', () => ({
-  checkTimeChallenge: vi.fn(async () => ({ isActive: false })),
-  assertNoActiveChallenge: vi.fn(async () => true),
+  passTimeChallenge: (...args: any[]) => passTimeChallenge(...args),
 }));
 
-const { nominateGuardians } = await import('../../../../src/actions/process/bridge/nominate-guardians.js');
-const { checkTimeChallenge, assertNoActiveChallenge } = await import('../../../../src/actions/process/bridge/time-challenge.js');
+const getOrCreate = vi.fn();
+vi.mock('../../../../src/services/registries/account-registry.js', () => ({
+  accountRegistry: { getOrCreate: (...args: any[]) => getOrCreate(...args) },
+}));
+
+const { makeNominateGuardians } =
+  await import('../../../../src/actions/process/bridge/nominate-guardians.js');
+const { BRIDGE_GOVERNANCE, LIQUIDITY_GOVERNANCE } =
+  await import('../../../../src/actions/process/bridge/governance.js');
+const nominateGuardians = makeNominateGuardians(BRIDGE_GOVERNANCE);
+
+const CREATED_AT = new Date('2024-01-01T00:00:00Z');
 
 describe('nominateGuardians', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   beforeEach(() => {
     tx = makeMockTx();
-    vi.mocked(checkTimeChallenge).mockReset();
-    vi.mocked(checkTimeChallenge).mockResolvedValue({ isActive: false });
-    vi.mocked(assertNoActiveChallenge).mockReset();
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(true);
+    passTimeChallenge.mockReset();
+    getOrCreate.mockReset();
+    getOrCreate.mockImplementation(async (_tx: any, address: string) =>
+      address === 'z1b' ? 2 : 1,
+    );
   });
 
-  it('revokes existing and creates new guardians', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({});                 // revoke all guardians
-    tx.resolveNext({ id: 10 });        // account lookup for z1addr1
-    tx.resolveNext({});                 // insert guardian 1
-    tx.resolveNext({ id: 11 });        // account lookup for z1addr2
-    tx.resolveNext({});                 // insert guardian 2
+  const run = () =>
+    nominateGuardians(
+      makeActionContext({
+        tx,
+        decoded: { guardians: ['z1b', 'z1a'] },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({
-      tx,
-      decoded: { guardians: ['z1addr1', 'z1addr2'] },
-    });
-    await expect(nominateGuardians(ctx)).resolves.toBeUndefined();
+  it('only starts the time challenge on the first call, hashing the sorted guardians', async () => {
+    passTimeChallenge.mockResolvedValue(false);
+
+    await run();
+
+    expect(passTimeChallenge).toHaveBeenCalledWith(
+      expect.anything(),
+      BRIDGE_GOVERNANCE,
+      'NominateGuardians',
+      'z1a,z1b',
+      BRIDGE_ADMINISTRATOR_DELAY,
+    );
+    expect(tx).not.toHaveBeenCalled();
   });
 
-  it('throws on missing guardians', async () => {
-    const ctx = makeActionContext({ tx, decoded: {} });
-    await expect(nominateGuardians(ctx)).rejects.toThrow('missing or empty');
+  it('replaces the guardians and clears pending administrator votes', async () => {
+    passTimeChallenge.mockResolvedValue(true);
+
+    await run();
+
+    expect(argsFor(tx, 'nom_bridge_guardians', 'update')).toEqual([{ revoked_at: CREATED_AT }]);
+    expect(argsFor(tx, 'nom_bridge_guardians', 'insert')).toEqual([
+      { account_id: 2, nominated_at: CREATED_AT, accepted_at: CREATED_AT },
+      { account_id: 1, nominated_at: CREATED_AT, accepted_at: CREATED_AT },
+    ]);
+    const [votes] = buildersFor(tx, 'nom_bridge_admins');
+    expect(votes.whereNull).toHaveBeenCalledWith('accepted_at');
+    expect(votes.del).toHaveBeenCalled();
   });
 
-  it('throws on empty guardians array', async () => {
-    const ctx = makeActionContext({ tx, decoded: { guardians: [] } });
-    await expect(nominateGuardians(ctx)).rejects.toThrow('missing or empty');
-  });
+  it('writes the liquidity contract guardians to their own table', async () => {
+    passTimeChallenge.mockResolvedValue(true);
 
-  it('warns if sender is not admin', async () => {
-    tx.resolveNext({ account_id: 999 });
-    const warnSpy = vi.spyOn(console, 'warn');
+    await makeNominateGuardians(LIQUIDITY_GOVERNANCE)(
+      makeActionContext({
+        tx,
+        decoded: { guardians: ['z1b', 'z1a'] },
+        receiveBlock: { createdAt: CREATED_AT },
+      }),
+    );
 
-    const ctx = makeActionContext({ tx, decoded: { guardians: ['z1addr'] } });
-    await nominateGuardians(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not bridge admin'));
-  });
-
-  it('skips unknown guardian addresses', async () => {
-    tx.resolveNext({ account_id: 1 });  // getActiveAdminAccountId
-    tx.resolveNext({});                 // revoke all guardians
-    tx.resolveNext(null);               // first address not found
-    tx.resolveNext({ id: 10 });        // second address found
-    tx.resolveNext({});                 // insert guardian
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({
-      tx,
-      decoded: { guardians: ['z1unknown', 'z1known'] },
-    });
-    await nominateGuardians(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('account not found'));
-  });
-
-  it('skips if time challenge active', async () => {
-    tx.resolveNext({ account_id: 1 });
-    vi.mocked(assertNoActiveChallenge).mockResolvedValue(false);
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: { guardians: ['z1addr'] } });
-    await nominateGuardians(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('time challenge'));
+    expect(argsFor(tx, 'nom_liquidity_guardians', 'insert')).toHaveLength(2);
+    expect(buildersFor(tx, 'nom_liquidity_admins')[0].del).toHaveBeenCalled();
+    expect(buildersFor(tx, 'nom_bridge_guardians')).toEqual([]);
   });
 });

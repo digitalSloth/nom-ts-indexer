@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { makeActionContext, makeMockTx } from '../../../helpers/mock-action-context.js';
 
 const { addPhase } = await import('../../../../src/actions/process/accelerator/add-phase.js');
@@ -7,7 +7,8 @@ describe('addPhase', () => {
   let tx: ReturnType<typeof makeMockTx>;
 
   const defaultDecoded = {
-    id: 'projecthash123',
+    // Decoded hash args are 0x-prefixed; rows store bare hex
+    id: '0xprojecthash123',
     name: 'Phase 1',
     description: 'First phase',
     url: 'https://example.com',
@@ -15,91 +16,56 @@ describe('addPhase', () => {
     qsrFundsNeeded: '2500000000',
   };
 
+  function phaseInsert() {
+    const builder = tx.mock.results
+      .map((r: any) => r.value)
+      .find((b: any) => b.insert.mock.calls.length);
+    return builder.insert.mock.calls[0][0];
+  }
+
   beforeEach(() => {
     tx = makeMockTx();
   });
 
-  it('creates a phase for an active project', async () => {
-    // 1. find project → {id:1, owner_id:1, status:1}
-    tx.resolveNext({ id: 1, owner_id: 1, status: 1 });
-    // 2. find latest phase → null (first phase)
+  it('creates the first phase of a project', async () => {
+    tx.resolveNext({ id: 1 }); // project
+    tx.resolveNext(null); // no phases yet
+
+    await addPhase(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    expect(phaseInsert()).toMatchObject({
+      project_id: 1,
+      hash: 'sendblockhash123',
+      name: 'Phase 1',
+      status: 0,
+      phase_number: 1,
+      znn_requested: 500000000n,
+      qsr_requested: 2500000000n,
+    });
+  });
+
+  it('numbers the phase after the latest one', async () => {
+    tx.resolveNext({ id: 1 });
+    tx.resolveNext({ phase_number: 3 });
+
+    await addPhase(makeActionContext({ tx, decoded: defaultDecoded }));
+
+    expect(phaseInsert()).toMatchObject({ phase_number: 4 });
+  });
+
+  it('throws when the project is not indexed', async () => {
     tx.resolveNext(null);
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
-
-    expect(tx).toHaveBeenCalledWith('nom_accelerator_projects');
-    expect(tx).toHaveBeenCalledWith('nom_accelerator_phases');
+    await expect(addPhase(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow(
+      'Accelerator.AddPhase: project not found for hash projecthash123',
+    );
   });
 
-  it('increments phase number from latest phase', async () => {
-    tx.resolveNext({ id: 1, owner_id: 1, status: 1 });
-    tx.resolveNext({ id: 5, status: 2, phase_number: 3 });
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
-
-    expect(tx).toHaveBeenCalledWith('nom_accelerator_phases');
-  });
-
-  it('warns if project not found', async () => {
+  it('looks up the project by its bare hash', async () => {
     tx.resolveNext(null);
-    const warnSpy = vi.spyOn(console, 'warn');
 
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
+    await expect(addPhase(makeActionContext({ tx, decoded: defaultDecoded }))).rejects.toThrow();
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('project not found'));
-  });
-
-  it('warns if sender is not project owner', async () => {
-    tx.resolveNext({ id: 1, owner_id: 999, status: 1 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not project owner'));
-  });
-
-  it('warns if project is not active', async () => {
-    tx.resolveNext({ id: 1, owner_id: 1, status: 0 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not active'));
-  });
-
-  it('warns if latest phase is not paid', async () => {
-    tx.resolveNext({ id: 1, owner_id: 1, status: 1 });
-    tx.resolveNext({ id: 5, status: 0, phase_number: 1 });
-    const warnSpy = vi.spyOn(console, 'warn');
-
-    const ctx = makeActionContext({ tx, decoded: defaultDecoded });
-    await addPhase(ctx);
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not paid'));
-  });
-
-  it('throws on name exceeding max length', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, name: 'A'.repeat(31) } });
-    await expect(addPhase(ctx)).rejects.toThrow('name exceeds 30 characters');
-  });
-
-  it('throws on description exceeding max length', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, description: 'A'.repeat(241) } });
-    await expect(addPhase(ctx)).rejects.toThrow('description exceeds 240 characters');
-  });
-
-  it('throws on invalid URL', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, url: 'not-a-url' } });
-    await expect(addPhase(ctx)).rejects.toThrow('invalid URL');
-  });
-
-  it('throws on znnFundsNeeded exceeding maximum', async () => {
-    const ctx = makeActionContext({ tx, decoded: { ...defaultDecoded, znnFundsNeeded: '500000000001' } });
-    await expect(addPhase(ctx)).rejects.toThrow('znnFundsNeeded exceeds maximum');
+    expect(tx.mock.results[0].value.where).toHaveBeenCalledWith({ hash: 'projecthash123' });
   });
 });

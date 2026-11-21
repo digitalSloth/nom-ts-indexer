@@ -8,9 +8,8 @@ let keyFor: typeof import('../../../src/actions/process/registry.js').keyFor;
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ registerHandler, getHandler, warnMissingOnce, keyFor } = await import(
-    '../../../src/actions/process/registry.js'
-  ));
+  ({ registerHandler, getHandler, warnMissingOnce, keyFor } =
+    await import('../../../src/actions/process/registry.js'));
 });
 
 describe('registry', () => {
